@@ -39,6 +39,7 @@ Commands:
   contacts                   List known conversation partners
   poll                       Poll inbox for new messages
   lookup <address>           Fetch a user's public registration
+  keychain                   Check keychain status and migrate keys
 
 Data directory: ${DATA_DIR}
 `);
@@ -157,6 +158,29 @@ Data directory: ${DATA_DIR}
       } catch (e) {
         console.error('❌ Lookup failed:', e.message);
         process.exit(1);
+      }
+      break;
+    }
+
+    case 'keychain': {
+      const subCmd = args[1];
+      if (status.usingKeychain) {
+        console.log('✅ Using OS keychain for key storage');
+        if (subCmd === 'verify') {
+          try {
+            await client.store.removePlaintextKeys();
+          } catch (e) {
+            console.error('❌', e.message);
+          }
+        } else {
+          console.log('\nRun `quorum keychain verify` to check keychain access');
+          console.log('and get instructions for removing plaintext key files.');
+        }
+      } else {
+        console.log('⚠️  OS keychain not available');
+        console.log('Keys are stored in plaintext at:', DATA_DIR + '/keys/');
+        console.log('\nTo enable keychain on macOS: just run the app, approve the prompt');
+        console.log('To enable keychain on Linux: ensure gnome-keyring or kwallet is running');
       }
       break;
     }

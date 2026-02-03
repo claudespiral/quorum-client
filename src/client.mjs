@@ -7,7 +7,7 @@
  */
 
 import { QuorumAPI } from './api.mjs';
-import { QuorumStore } from './store.mjs';
+import { createSecureStore } from './secure-store.mjs';
 import {
   initCrypto,
   newDeviceKeyset,
@@ -30,19 +30,25 @@ export class QuorumClient {
     this.dataDir = options.dataDir || '.quorum-data';
     this.displayName = options.displayName || 'Quorum User';
     this.api = new QuorumAPI(options.apiUrl);
-    this.store = new QuorumStore(this.dataDir);
+    this.store = null; // Initialized in init()
+    this.useKeychain = options.useKeychain !== false; // Default true
     this.initialized = false;
   }
 
   async init() {
     await initCrypto();
+    
+    // Initialize secure store (with keychain support)
+    this.store = await createSecureStore(this.dataDir, this.useKeychain);
+    
     this.userKeys = this.store.load('user-keys.json');
-    this.deviceKeyset = this.store.load('device-keyset.json');
-    this.registration = this.store.load('registration.json');
+    this.deviceKeyset = await this.store.getDeviceKeyset();
+    this.registration = this.store.getRegistration();
     this.initialized = true;
     return {
       hasIdentity: !!this.registration,
       address: this.registration?.user_address || null,
+      usingKeychain: this.store.isUsingKeychain,
     };
   }
 
@@ -90,8 +96,8 @@ export class QuorumClient {
       address: userAddress,
     };
     this.store.save('user-keys.json', this.userKeys);
-    this.store.save('device-keyset.json', this.deviceKeyset);
-    this.store.save('registration.json', this.registration);
+    await this.store.saveDeviceKeyset(this.deviceKeyset); // Keychain-backed
+    this.store.saveRegistration(this.registration);
     this.store.save('profile.json', {
       displayName: this.displayName,
       userAddress,
