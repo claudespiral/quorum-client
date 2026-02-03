@@ -56,15 +56,7 @@ function bytesToHex(bytes) {
 async function sendDM(recipientAddress, content, store, deviceKeyset, registration) {
   const api = new QuorumAPI();
   
-  // Check for existing session
-  let session = store.getSession(recipientAddress);
-  
-  if (session) {
-    // Follow-up message using existing session
-    return await sendFollowUp(recipientAddress, content, session, store, deviceKeyset, registration);
-  }
-  
-  // First message - need to establish session
+  // Always fetch fresh device info from API (inbox addresses can change if device re-registers)
   const recipient = await api.getUser(recipientAddress);
   if (!recipient?.device_registrations?.length) {
     throw new Error('Recipient not found or has no devices');
@@ -75,6 +67,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   const receiverIdentityKey = [...Buffer.from(device.identity_public_key, 'hex')];
   const receiverPreKey = [...Buffer.from(device.pre_public_key, 'hex')];
   
+  // Always do fresh X3DH (simpler and more reliable than session management)
   const sessionKeyB64 = senderX3DH(
     deviceKeyset.identity_key.private_key,
     ephemeralKey.private_key,
@@ -104,7 +97,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   
   const { ratchet_state: newState, envelope: msgEnvelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
   
-  // Build init envelope
+  // Build init envelope (always include full handshake info)
   const initEnvelope = {
     user_address: registration.user_address,
     display_name: getDisplayName(),
@@ -142,7 +135,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
     body: JSON.stringify(sealedMessage),
   });
   
-  // Save session
+  // Save session (for receiving replies)
   store.saveSession(recipientAddress, {
     ratchet_state: newState,
     sending_inbox: {
@@ -153,61 +146,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
     sender_name: recipient.display_name || recipientAddress.substring(0, 12),
   });
   
-  return { sent: true, firstMessage: true };
-}
-
-async function sendFollowUp(recipientAddress, content, session, store, deviceKeyset, registration) {
-  const messagePayload = JSON.stringify({
-    messageId: randomUUID(),
-    content: { ...content, senderId: registration.user_address },
-    createdDate: Date.now(),
-    modifiedDate: Date.now(),
-  });
-  
-  const { ratchet_state: newState, envelope } = doubleRatchetEncrypt(session.ratchet_state, messagePayload);
-  const ephemeralKey = generateX448();
-  
-  // Build envelope with return info
-  const payload = JSON.stringify({
-    return_inbox_address: deviceKeyset.inbox_address,
-    return_inbox_encryption_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_encryption_key.public_key)),
-    return_inbox_public_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.public_key)),
-    return_inbox_private_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.private_key)),
-    user_address: registration.user_address,
-    identity_public_key: bytesToHex(new Uint8Array(deviceKeyset.identity_key.public_key)),
-    tag: deviceKeyset.inbox_address,
-    display_name: getDisplayName(),
-    message: envelope,
-    type: 'direct',
-  });
-  
-  const ciphertext = encryptInboxMessageBytes(
-    [...Buffer.from(session.sending_inbox.inbox_encryption_key, 'hex')],
-    ephemeralKey.private_key,
-    [...Buffer.from(payload, 'utf-8')]
-  );
-  
-  const sealedMessage = {
-    inbox_address: session.sending_inbox.inbox_address,
-    ephemeral_public_key: bytesToHex(new Uint8Array(ephemeralKey.public_key)),
-    envelope: ciphertext,
-    hub_address: '',
-    hub_public_key: '',
-    hub_signature: '',
-    timestamp: Date.now(),
-  };
-  
-  await fetch(`${API_BASE}/inbox`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(sealedMessage),
-  });
-  
-  // Update session
-  session.ratchet_state = newState;
-  store.saveSession(recipientAddress, session);
-  
-  return { sent: true, firstMessage: false };
+  return { sent: true };
 }
 
 function getDisplayName() {
