@@ -2,7 +2,15 @@
 
 Headless E2EE client for [Quorum](https://quilibrium.com) messenger — the Quilibrium-powered encrypted messaging platform.
 
-**Zero dependencies** beyond Node.js 20+ and `ws`. Cryptography runs via bundled WASM (Decaf448 curves, Double Ratchet, X3DH).
+Cryptography runs via bundled WASM (Decaf448 curves, Double Ratchet, X3DH).
+
+## Dependencies
+
+- Node.js 20+
+- `ws` — WebSocket client
+- `keytar` — OS keychain access (macOS Keychain, Linux libsecret, Windows Credential Vault)
+
+On Linux, you may need to install libsecret: `sudo apt install libsecret-1-dev`
 
 ## Quick Start
 
@@ -38,6 +46,8 @@ Works with the official Quorum mobile/desktop apps — full interoperability.
 
 ## Commands
 
+### Direct Messages
+
 ```bash
 # Register a new identity (first time only)
 node cli.mjs register "DisplayName"
@@ -53,6 +63,25 @@ node send.mjs "Your message here" QmRecipientAddress...
 
 # Listen for incoming messages (default 2 min timeout)
 node listen.mjs [timeout_seconds]
+```
+
+### Spaces (Group Chat)
+
+```bash
+# Join a space from invite link
+node space.mjs join "https://app.quorummessenger.com/#spaceId=..."
+
+# List joined spaces
+node space.mjs list
+
+# Send to a space
+node space.mjs send QmSpaceId... "Hello everyone!"
+
+# Listen for space messages
+node space.mjs listen QmSpaceId...
+
+# List channels in a space
+node space.mjs channels QmSpaceId...
 ```
 
 ## How It Works
@@ -85,17 +114,20 @@ No server ever sees your plaintext. Even if the relay is compromised, messages r
 
 ## Data Storage
 
-All data stored in `~/.quorum-client/`:
+**Sensitive keys** are stored in your OS keychain (encrypted at rest):
+- Identity keys (Ed448 user keys, X448 device keys)
+- Space keys (hub keys, config keys, inbox keys)
 
+**Session state** stored in `~/.quorum-client/` (0600 permissions):
 ```
-device-keyset.json    — Your X448 keys (KEEP SECRET!)
-registration.json     — Your public registration
-profile.json          — Display name, metadata
-user-keys.json        — Ed448 identity keys (KEEP SECRET!)
-sessions/             — Double Ratchet session states
+keys/registration.json  — Public registration info
+sessions/               — Double Ratchet session states
+profile.json            — Display name, metadata
 ```
 
-⚠️ **Backup your `~/.quorum-client/` directory** — losing it means losing your identity.
+⚠️ **Your keychain contains your identity** — if you need to migrate machines, export keys first.
+
+Falls back to plaintext files if keychain is unavailable (with a warning).
 
 ## Architecture
 
