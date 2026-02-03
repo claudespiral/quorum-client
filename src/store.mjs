@@ -5,16 +5,18 @@
  * All sensitive data is stored as JSON files in a configurable directory.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, openSync, closeSync, fsyncSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, openSync, closeSync, fsyncSync, chmodSync } from 'fs';
 import { join } from 'path';
 
 /**
  * Atomic file write: write to temp file, fsync, then rename.
  * Rename is atomic on POSIX, so we either get the old file or the new one, never partial.
+ * Uses mode 0600 (owner read/write only) for security.
  */
-function atomicWriteFileSync(targetPath, data) {
+function atomicWriteFileSync(targetPath, data, mode = 0o600) {
   const tempPath = `${targetPath}.tmp.${process.pid}`;
-  const fd = openSync(tempPath, 'w');
+  // Open with restrictive permissions from the start
+  const fd = openSync(tempPath, 'w', mode);
   try {
     writeFileSync(fd, data);
     fsyncSync(fd);
@@ -22,6 +24,8 @@ function atomicWriteFileSync(targetPath, data) {
     closeSync(fd);
   }
   renameSync(tempPath, targetPath);
+  // Ensure final file has correct permissions (rename preserves temp file permissions)
+  chmodSync(targetPath, mode);
 }
 
 export class QuorumStore {
@@ -31,9 +35,9 @@ export class QuorumStore {
     this.sessionsDir = join(dataDir, 'sessions');
     this.conversationsDir = join(dataDir, 'conversations');
     
-    // Ensure directories exist
+    // Ensure directories exist with secure permissions (owner only)
     for (const dir of [this.dataDir, this.keysDir, this.sessionsDir, this.conversationsDir]) {
-      mkdirSync(dir, { recursive: true });
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
   }
 

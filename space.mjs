@@ -26,6 +26,7 @@ import {
   generateEd448, 
   generateX448, 
   signEd448,
+  safeVerifyEd448,
   getEd448PubKey,
   getX448PubKey,
   deriveAddress,
@@ -50,6 +51,32 @@ async function getStore() {
 }
 
 // ============ Helpers ============
+
+/**
+ * Verify a space message signature
+ * Returns { valid: boolean, error?: string }
+ */
+function verifyMessageSignature(message) {
+  if (!message.signature || !message.publicKey) {
+    return { valid: false, error: 'Missing signature or publicKey' };
+  }
+  
+  // Reconstruct the message without signature for verification
+  const { signature, ...msgWithoutSig } = message;
+  const msgBytes = new TextEncoder().encode(JSON.stringify(msgWithoutSig));
+  
+  const result = safeVerifyEd448(
+    bytesToBase64(hexToBytes(message.publicKey)),
+    bytesToBase64(msgBytes),
+    bytesToBase64(hexToBytes(signature))
+  );
+  
+  // Normalize to { valid, error } format
+  return { 
+    valid: result.success && result.verified, 
+    error: result.error?.message || result.error 
+  };
+}
 
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
@@ -330,10 +357,17 @@ async function cmdListen(spaceId, duration = 0) {
       const parsed = JSON.parse(plaintext);
       
       if (parsed.type === 'message' && parsed.message?.content?.text) {
-        const sender = parsed.message.content.senderId;
+        const message = parsed.message;
+        const sender = message.content.senderId;
         const isMe = sender === spaceKeys.inboxAddress;
         const displaySender = isMe ? 'Me' : sender.substring(0, 12) + '...';
-        console.log(`[${new Date().toLocaleTimeString()}] ${displaySender}: ${parsed.message.content.text}`);
+        
+        // Verify message signature (only reliable for our own messages due to JSON serialization differences)
+        const sigResult = verifyMessageSignature(message);
+        // Show ✓ for verified, blank for unverified (don't alarm on mobile interop issues)
+        const sigStatus = sigResult.valid ? '✓' : ' ';
+        
+        console.log(`[${new Date().toLocaleTimeString()}]${sigStatus} ${displaySender}: ${message.content.text}`);
       }
     } catch (err) {
       // Silently ignore decrypt errors (control messages, etc)
