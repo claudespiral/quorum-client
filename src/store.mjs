@@ -5,8 +5,24 @@
  * All sensitive data is stored as JSON files in a configurable directory.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, openSync, closeSync, fsyncSync } from 'fs';
 import { join } from 'path';
+
+/**
+ * Atomic file write: write to temp file, fsync, then rename.
+ * Rename is atomic on POSIX, so we either get the old file or the new one, never partial.
+ */
+function atomicWriteFileSync(targetPath, data) {
+  const tempPath = `${targetPath}.tmp.${process.pid}`;
+  const fd = openSync(tempPath, 'w');
+  try {
+    writeFileSync(fd, data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tempPath, targetPath);
+}
 
 export class QuorumStore {
   constructor(dataDir) {
@@ -25,7 +41,7 @@ export class QuorumStore {
 
   /** Save the user keyset (Ed448 user key + X448 peer key) */
   saveUserKeyset(keyset) {
-    writeFileSync(join(this.keysDir, 'user-keyset.json'), JSON.stringify(keyset, null, 2));
+    atomicWriteFileSync(join(this.keysDir, 'user-keyset.json'), JSON.stringify(keyset, null, 2));
   }
 
   /** Load the user keyset */
@@ -37,7 +53,7 @@ export class QuorumStore {
 
   /** Save the device keyset (identity + pre-key + inbox) */
   saveDeviceKeyset(keyset) {
-    writeFileSync(join(this.keysDir, 'device-keyset.json'), JSON.stringify(keyset, null, 2));
+    atomicWriteFileSync(join(this.keysDir, 'device-keyset.json'), JSON.stringify(keyset, null, 2));
   }
 
   /** Load the device keyset */
@@ -49,7 +65,7 @@ export class QuorumStore {
 
   /** Save the user registration (public info posted to API) */
   saveRegistration(reg) {
-    writeFileSync(join(this.keysDir, 'registration.json'), JSON.stringify(reg, null, 2));
+    atomicWriteFileSync(join(this.keysDir, 'registration.json'), JSON.stringify(reg, null, 2));
   }
 
   /** Load the user registration */
@@ -69,10 +85,11 @@ export class QuorumStore {
   /** 
    * Save a Double Ratchet session state.
    * tag = unique identifier for the conversation partner's inbox.
+   * Uses atomic write to prevent corruption on crash.
    */
   saveSession(tag, state) {
     const safeName = Buffer.from(tag).toString('hex');
-    writeFileSync(join(this.sessionsDir, `${safeName}.json`), JSON.stringify(state, null, 2));
+    atomicWriteFileSync(join(this.sessionsDir, `${safeName}.json`), JSON.stringify(state, null, 2));
   }
 
   /** Load a session state by tag */
@@ -94,7 +111,7 @@ export class QuorumStore {
 
   /** Save conversation metadata */
   saveConversation(conversationId, metadata) {
-    writeFileSync(
+    atomicWriteFileSync(
       join(this.conversationsDir, `${conversationId}.json`),
       JSON.stringify(metadata, null, 2)
     );
@@ -119,7 +136,7 @@ export class QuorumStore {
 
   /** Save a generic key-value pair */
   save(filename, data) {
-    writeFileSync(join(this.dataDir, filename), JSON.stringify(data, null, 2));
+    atomicWriteFileSync(join(this.dataDir, filename), JSON.stringify(data, null, 2));
   }
 
   /** Load a generic key-value pair */
