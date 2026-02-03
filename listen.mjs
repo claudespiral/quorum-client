@@ -12,8 +12,9 @@ import { join } from 'path';
 import { homedir } from 'os';
 
 import { 
-  initCrypto, decryptInboxMessage, receiverX3DH, 
-  newDoubleRatchet, doubleRatchetDecrypt, signEd448
+  initCrypto, receiverX3DH, newDoubleRatchet, signEd448,
+  safeDecryptInboxMessage, safeDoubleRatchetDecrypt,
+  CryptoErrorType
 } from './src/crypto.mjs';
 import { QuorumAPI } from './src/api.mjs';
 
@@ -42,31 +43,57 @@ console.log('Listening on inbox:', INBOX);
  * Decrypt and process an incoming message
  */
 async function processMessage(raw) {
+  let timestamp = null;
+  let senderHint = 'unknown';
+  
   try {
     const parsed = JSON.parse(raw);
-    const timestamp = parsed.timestamp;
+    timestamp = parsed.timestamp;
     const sealed = JSON.parse(parsed.encryptedContent);
     
-    // Decrypt outer envelope
+    // Decrypt outer envelope (inbox decryption)
     const ephPubKey = [...Buffer.from(sealed.ephemeral_public_key, 'hex')];
-    const plaintext = decryptInboxMessage(
+    const inboxResult = safeDecryptInboxMessage(
       deviceKeyset.inbox_encryption_key.private_key,
       ephPubKey,
       sealed.envelope
     );
-    const envelope = JSON.parse(Buffer.from(new Uint8Array(plaintext)).toString('utf-8'));
+    
+    if (!inboxResult.success) {
+      if (inboxResult.error.type === CryptoErrorType.DECRYPTION_FAILED) {
+        console.error(`\n⚠️  [${new Date(timestamp).toLocaleTimeString()}] Message authentication failed - dropping`);
+        console.error(`   Reason: ${inboxResult.error.details.original}`);
+        console.error(`   This could indicate: wrong recipient, corrupted message, or tampering`);
+      } else {
+        console.error(`\n⚠️  Inbox decryption error: ${inboxResult.error.message}`);
+      }
+      // Still mark for deletion to clear bad messages from inbox
+      processedTimestamps.push(timestamp);
+      return { success: false, error: inboxResult.error };
+    }
+    
+    const envelope = JSON.parse(Buffer.from(new Uint8Array(inboxResult.data)).toString('utf-8'));
+    senderHint = envelope.display_name || envelope.user_address?.substring(0, 12) || 'unknown';
     
     // Receiver X3DH to get session key
     const senderIdentityKey = [...Buffer.from(envelope.identity_public_key, 'hex')];
     const senderEphemeralKey = [...Buffer.from(sealed.ephemeral_public_key, 'hex')];
     
-    const sessionKeyB64 = receiverX3DH(
-      deviceKeyset.identity_key.private_key,
-      deviceKeyset.pre_key.private_key,
-      senderIdentityKey,
-      senderEphemeralKey,
-      96
-    );
+    let sessionKeyB64;
+    try {
+      sessionKeyB64 = receiverX3DH(
+        deviceKeyset.identity_key.private_key,
+        deviceKeyset.pre_key.private_key,
+        senderIdentityKey,
+        senderEphemeralKey,
+        96
+      );
+    } catch (e) {
+      console.error(`\n⚠️  [${new Date(timestamp).toLocaleTimeString()}] X3DH key exchange failed from ${senderHint}`);
+      console.error(`   Reason: ${e.message}`);
+      processedTimestamps.push(timestamp);
+      return { success: false, error: e };
+    }
     
     const rootKey = [...Buffer.from(sessionKeyB64, 'base64')];
     
@@ -79,11 +106,26 @@ async function processMessage(raw) {
       receiving_ephemeral_key: senderEphemeralKey,
     });
     
-    // Decrypt inner message
-    const result = doubleRatchetDecrypt(ratchetState, envelope.message);
-    const msg = JSON.parse(result.message);
+    // Decrypt inner message (Double Ratchet)
+    const drResult = safeDoubleRatchetDecrypt(ratchetState, envelope.message);
     
-    console.log(`\n📨 [${new Date(timestamp).toLocaleTimeString()}] ${envelope.display_name || envelope.user_address.substring(0, 12)}:`);
+    if (!drResult.success) {
+      if (drResult.error.type === CryptoErrorType.RATCHET_FAILED) {
+        console.error(`\n⚠️  [${new Date(timestamp).toLocaleTimeString()}] Ratchet decryption failed from ${senderHint}`);
+        console.error(`   Reason: ${drResult.error.details.original}`);
+        console.error(`   Message may be out of order, corrupted, or from wrong session`);
+      } else if (drResult.error.type === CryptoErrorType.MALFORMED_MESSAGE) {
+        console.error(`\n⚠️  [${new Date(timestamp).toLocaleTimeString()}] Malformed message from ${senderHint}`);
+      } else {
+        console.error(`\n⚠️  Decryption error: ${drResult.error.message}`);
+      }
+      processedTimestamps.push(timestamp);
+      return { success: false, error: drResult.error };
+    }
+    
+    const msg = JSON.parse(drResult.data.message);
+    
+    console.log(`\n📨 [${new Date(timestamp).toLocaleTimeString()}] ${senderHint}:`);
     console.log(`   ${msg.content?.text || '(no text)'}`);
     
     // Mark for deletion
@@ -91,8 +133,12 @@ async function processMessage(raw) {
     
     return { success: true, envelope, msg };
   } catch (e) {
-    console.error('Failed to decrypt:', e.message);
-    return { success: false };
+    // Catch-all for unexpected errors (JSON parse failures, etc.)
+    const timeStr = timestamp ? new Date(timestamp).toLocaleTimeString() : 'unknown time';
+    console.error(`\n❌ [${timeStr}] Unexpected error processing message from ${senderHint}:`);
+    console.error(`   ${e.message}`);
+    if (timestamp) processedTimestamps.push(timestamp);
+    return { success: false, error: e };
   }
 }
 

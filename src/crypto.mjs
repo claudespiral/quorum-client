@@ -276,3 +276,101 @@ export function decryptInboxMessage(inboxPrivKey, ephemeralPubKey, ciphertext) {
     ciphertext: typeof ciphertext === 'string' ? JSON.parse(ciphertext) : ciphertext,
   })));
 }
+
+// ============ Error Types ============
+
+export class CryptoError extends Error {
+  constructor(message, type, details = {}) {
+    super(message);
+    this.name = 'CryptoError';
+    this.type = type;
+    this.details = details;
+  }
+}
+
+export const CryptoErrorType = {
+  DECRYPTION_FAILED: 'DECRYPTION_FAILED',
+  SIGNATURE_INVALID: 'SIGNATURE_INVALID',
+  KEY_EXCHANGE_FAILED: 'KEY_EXCHANGE_FAILED',
+  RATCHET_FAILED: 'RATCHET_FAILED',
+  MALFORMED_MESSAGE: 'MALFORMED_MESSAGE',
+};
+
+// ============ Safe Wrappers ============
+
+/**
+ * Safely decrypt an inbox message with proper error categorization
+ */
+export function safeDecryptInboxMessage(inboxPrivKey, ephemeralPubKey, ciphertext) {
+  try {
+    return { 
+      success: true, 
+      data: decryptInboxMessage(inboxPrivKey, ephemeralPubKey, ciphertext) 
+    };
+  } catch (e) {
+    const msg = e.message || String(e);
+    // AEAD failures indicate authentication failure (tampered or wrong key)
+    if (msg.includes('aead') || msg.includes('decrypt') || msg.includes('tag')) {
+      return { 
+        success: false, 
+        error: new CryptoError('Message authentication failed', CryptoErrorType.DECRYPTION_FAILED, { original: msg })
+      };
+    }
+    return { 
+      success: false, 
+      error: new CryptoError(`Inbox decryption failed: ${msg}`, CryptoErrorType.DECRYPTION_FAILED, { original: msg })
+    };
+  }
+}
+
+/**
+ * Safely decrypt a Double Ratchet message with proper error categorization
+ */
+export function safeDoubleRatchetDecrypt(ratchetState, envelope) {
+  try {
+    const result = JSON.parse(wasm.js_double_ratchet_decrypt(JSON.stringify({
+      ratchet_state: ratchetState,
+      envelope: envelope,
+    })));
+    return {
+      success: true,
+      data: {
+        ratchet_state: result.ratchet_state,
+        message: Buffer.from(new Uint8Array(result.message)).toString('utf-8'),
+      }
+    };
+  } catch (e) {
+    const msg = e.message || String(e);
+    if (msg.includes('aead') || msg.includes('tag') || msg.includes('authentication')) {
+      return {
+        success: false,
+        error: new CryptoError('Ratchet message authentication failed', CryptoErrorType.RATCHET_FAILED, { original: msg })
+      };
+    }
+    if (msg.includes('header') || msg.includes('malformed')) {
+      return {
+        success: false,
+        error: new CryptoError('Malformed ratchet envelope', CryptoErrorType.MALFORMED_MESSAGE, { original: msg })
+      };
+    }
+    return {
+      success: false,
+      error: new CryptoError(`Double ratchet decrypt failed: ${msg}`, CryptoErrorType.RATCHET_FAILED, { original: msg })
+    };
+  }
+}
+
+/**
+ * Verify an Ed448 signature, returning a result object instead of throwing
+ */
+export function safeVerifyEd448(pubKeyB64, messageB64, signatureB64) {
+  try {
+    const result = verifyEd448(pubKeyB64, messageB64, signatureB64);
+    return { success: result === true || result === 'true', verified: result };
+  } catch (e) {
+    return { 
+      success: false, 
+      error: new CryptoError('Signature verification failed', CryptoErrorType.SIGNATURE_INVALID, { original: e.message })
+    };
+  }
+}
