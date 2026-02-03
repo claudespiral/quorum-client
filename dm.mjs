@@ -2,7 +2,17 @@
 /**
  * Quorum DM CLI
  * 
- * Commands:
+ * Global flags:
+ *   -i, --identity <name>    Use specific identity (default: "default")
+ * 
+ * Identity commands:
+ *   dm identity list                           List all identities
+ *   dm identity create <name>                  Create new identity
+ *   dm identity show                           Show current identity info
+ *   dm identity rename <old> <new>             Rename an identity
+ *   dm identity delete <name>                  Delete an identity
+ * 
+ * Message commands:
  *   dm send <address> <text> [-r reply-to-id]  Send a DM
  *   dm embed <address> <image-path> [-r id]    Send an image
  *   dm edit <address> <msg-id> <new-text>      Edit a message
@@ -17,7 +27,7 @@ import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
 import { randomUUID } from 'crypto';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -35,9 +45,78 @@ import {
 import { QuorumAPI } from './src/api.mjs';
 import { createSecureStore } from './src/secure-store.mjs';
 
-const DATA_DIR = process.env.QUORUM_DATA_DIR || join(homedir(), '.quorum-client');
+const BASE_DIR = process.env.QUORUM_BASE_DIR || join(homedir(), '.quorum-client');
 const WS_URL = 'wss://api.quorummessenger.com/ws';
 const API_BASE = 'https://api.quorummessenger.com';
+
+// ============ Identity Management ============
+
+function getIdentitiesDir() {
+  const dir = join(BASE_DIR, 'identities');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function listIdentities() {
+  const dir = getIdentitiesDir();
+  const identities = readdirSync(dir, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+  
+  // Also check for legacy default location (keys stored in keychain, but registration.json exists)
+  const legacyReg = join(BASE_DIR, 'keys', 'registration.json');
+  if (existsSync(legacyReg) && !identities.includes('default')) {
+    // Migrate legacy to identities/default
+    const legacyDir = join(BASE_DIR, 'keys');
+    const newDir = join(getIdentitiesDir(), 'default');
+    const newKeysDir = join(newDir, 'keys');
+    if (!existsSync(newDir)) {
+      mkdirSync(newKeysDir, { recursive: true });
+      mkdirSync(join(newDir, 'sessions'), { recursive: true });
+      // Move registration file to keys/ subdirectory (QuorumStore expects it there)
+      if (existsSync(join(legacyDir, 'registration.json'))) {
+        renameSync(join(legacyDir, 'registration.json'), join(newKeysDir, 'registration.json'));
+      }
+      // Copy profile if exists (stays in root of identity dir)
+      if (existsSync(join(BASE_DIR, 'profile.json'))) {
+        renameSync(join(BASE_DIR, 'profile.json'), join(newDir, 'profile.json'));
+      }
+      // Move sessions
+      if (existsSync(join(BASE_DIR, 'sessions'))) {
+        renameSync(join(BASE_DIR, 'sessions'), join(newDir, 'sessions'));
+      }
+      console.log('📦 Migrated legacy identity to "default"');
+    }
+    identities.unshift('default');
+  }
+  
+  return identities;
+}
+
+function getIdentityDir(name) {
+  return join(getIdentitiesDir(), name);
+}
+
+function identityExists(name) {
+  return existsSync(getIdentityDir(name));
+}
+
+async function createIdentity(name) {
+  if (identityExists(name)) {
+    throw new Error(`Identity "${name}" already exists`);
+  }
+  
+  const dir = getIdentityDir(name);
+  mkdirSync(dir, { recursive: true });
+  
+  // Use QuorumClient for full registration flow
+  const { QuorumClient } = await import('./src/client.mjs');
+  const client = new QuorumClient({ dataDir: dir });
+  await client.init();
+  await client.register(name);
+  
+  return { name, address: client.registration.user_address };
+}
 
 // ============ Helpers ============
 
@@ -597,15 +676,43 @@ async function cmdConversations(store) {
 
 // ============ Main ============
 
+function parseArgs(argv) {
+  const result = { identity: 'default', args: [] };
+  let i = 0;
+  while (i < argv.length) {
+    if (argv[i] === '-i' || argv[i] === '--identity') {
+      result.identity = argv[i + 1];
+      i += 2;
+    } else {
+      result.args.push(argv[i]);
+      i++;
+    }
+  }
+  return result;
+}
+
 async function main() {
-  const [cmd, ...args] = process.argv.slice(2);
+  const { identity, args: rawArgs } = parseArgs(process.argv.slice(2));
+  const [cmd, ...args] = rawArgs;
   
   if (!cmd || cmd === 'help' || cmd === '-h' || cmd === '--help') {
     console.log(`
 Quorum DM CLI
 
-Commands:
+Global flags:
+  -i, --identity <name>    Use specific identity (default: "default")
+
+Identity commands:
+  identity list                            List all identities
+  identity create <name>                   Create new identity  
+  identity show                            Show current identity info
+  identity rename <old> <new>              Rename an identity
+  identity delete <name>                   Delete an identity (cannot delete active)
+
+Message commands:
   send <address> <text> [-r reply-to-id]   Send a direct message
+  embed <address> <image-path> [-r id]     Send an image
+  edit <address> <msg-id> <new-text>       Edit a message
   react <address> <msg-id> <emoji>         React to a message
   unreact <address> <msg-id> <emoji>       Remove a reaction
   delete <address> <msg-id>                Delete a message
@@ -613,18 +720,111 @@ Commands:
   conversations                            List conversations
 
 Examples:
-  node dm.mjs send QmRecipient... "Hello!"
-  node dm.mjs send QmRecipient... "Reply!" -r abc123-def456...
-  node dm.mjs react QmRecipient... abc123-def456... 👍
-  node dm.mjs unreact QmRecipient... abc123-def456... 👍
-  node dm.mjs delete QmRecipient... abc123-def456...
+  node dm.mjs identity create alice
+  node dm.mjs -i alice send QmBob... "Hello from Alice!"
+  node dm.mjs send QmRecipient... "Hello!"  (uses default identity)
   node dm.mjs listen
-  node dm.mjs listen 60
 `);
     return;
   }
   
+  // Handle identity commands (don't need full crypto init)
+  if (cmd === 'identity') {
+    const subCmd = args[0];
+    
+    if (subCmd === 'list') {
+      const identities = listIdentities();
+      if (identities.length === 0) {
+        console.log('No identities found. Create one with: dm identity create <name>');
+      } else {
+        console.log('Identities:\n');
+        for (const name of identities) {
+          const dir = getIdentityDir(name);
+          try {
+            // Registration is stored in keys/ subdirectory
+            const regFile = join(dir, 'keys', 'registration.json');
+            if (existsSync(regFile)) {
+              const reg = JSON.parse(readFileSync(regFile, 'utf-8'));
+              const marker = name === identity ? ' (active)' : '';
+              console.log(`  ${name}${marker}`);
+              console.log(`    Address: ${reg.user_address}`);
+            } else {
+              console.log(`  ${name} (not registered)`);
+            }
+          } catch {
+            console.log(`  ${name} (error reading)`);
+          }
+        }
+      }
+      return;
+    }
+    
+    if (subCmd === 'create') {
+      const name = args[1];
+      if (!name) throw new Error('Usage: dm identity create <name>');
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+        throw new Error('Identity name must be alphanumeric (with - or _)');
+      }
+      console.log(`Creating identity "${name}"...`);
+      const { address } = await createIdentity(name);
+      console.log(`✅ Created identity "${name}"`);
+      console.log(`   Address: ${address}`);
+      return;
+    }
+    
+    if (subCmd === 'show') {
+      await initCrypto();
+      const dir = getIdentityDir(identity);
+      if (!identityExists(identity)) {
+        throw new Error(`Identity "${identity}" not found`);
+      }
+      const store = await createSecureStore(dir);
+      const reg = store.getRegistration();
+      const profile = existsSync(join(dir, 'profile.json')) 
+        ? JSON.parse(readFileSync(join(dir, 'profile.json'), 'utf-8'))
+        : {};
+      console.log(`Identity: ${identity}`);
+      console.log(`  Address: ${reg?.user_address || 'not registered'}`);
+      console.log(`  Display name: ${profile.displayName || reg?.display_name || identity}`);
+      console.log(`  Data dir: ${dir}`);
+      return;
+    }
+    
+    if (subCmd === 'rename') {
+      const [oldName, newName] = [args[1], args[2]];
+      if (!oldName || !newName) throw new Error('Usage: dm identity rename <old> <new>');
+      if (!identityExists(oldName)) throw new Error(`Identity "${oldName}" not found`);
+      if (identityExists(newName)) throw new Error(`Identity "${newName}" already exists`);
+      renameSync(getIdentityDir(oldName), getIdentityDir(newName));
+      console.log(`✅ Renamed "${oldName}" to "${newName}"`);
+      return;
+    }
+    
+    if (subCmd === 'delete') {
+      const name = args[1];
+      if (!name) throw new Error('Usage: dm identity delete <name>');
+      if (!identityExists(name)) throw new Error(`Identity "${name}" not found`);
+      rmSync(getIdentityDir(name), { recursive: true });
+      console.log(`✅ Deleted identity "${name}"`);
+      return;
+    }
+    
+    throw new Error(`Unknown identity command: ${subCmd}`);
+  }
+  
   await initCrypto();
+  
+  // Resolve identity directory
+  const DATA_DIR = getIdentityDir(identity);
+  if (!identityExists(identity)) {
+    if (identity === 'default') {
+      // Auto-create default identity
+      console.log('Creating default identity...');
+      await createIdentity('default');
+    } else {
+      throw new Error(`Identity "${identity}" not found. Create with: dm identity create ${identity}`);
+    }
+  }
   
   // Load identity
   const store = await createSecureStore(DATA_DIR);
@@ -632,11 +832,12 @@ Examples:
   const registration = store.getRegistration();
   
   if (!deviceKeyset || !registration) {
-    console.error('No identity found. Run: node cli.mjs register <name>');
+    console.error(`Identity "${identity}" not properly initialized.`);
+    console.error('Try: dm identity delete ' + identity + ' && dm identity create ' + identity);
     process.exit(1);
   }
   
-  console.log('🔐 Using OS keychain for key storage');
+  console.log(`🔐 Using identity: ${identity}`);
   
   switch (cmd) {
     case 'send': {
