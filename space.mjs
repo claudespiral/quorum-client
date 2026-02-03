@@ -230,7 +230,7 @@ async function cmdJoin(inviteUrl) {
   console.log('Keys saved to:', savedPath);
 }
 
-async function cmdSend(spaceId, text, channelId = null) {
+async function cmdSend(spaceId, text, channelId = null, replyToMessageId = null) {
   const spaceKeys = await loadSpaceKeys(spaceId);
   
   // Use provided channel or fall back to default
@@ -243,6 +243,16 @@ async function cmdSend(spaceId, text, channelId = null) {
   const idContent = `${spaceId}:${channelId}:${spaceKeys.inboxAddress}:${nonce}:${timestamp}`;
   const messageId = bytesToHex(createHash('sha256').update(idContent).digest());
   
+  // Build content with optional reply
+  const content = {
+    type: 'post',
+    senderId: spaceKeys.inboxAddress,
+    text,
+  };
+  if (replyToMessageId) {
+    content.repliesToMessageId = replyToMessageId;
+  }
+  
   // Build message
   const message = {
     channelId,
@@ -253,11 +263,7 @@ async function cmdSend(spaceId, text, channelId = null) {
     createdDate: timestamp,
     modifiedDate: timestamp,
     lastModifiedHash: '',
-    content: {
-      type: 'post',
-      senderId: spaceKeys.inboxAddress,
-      text,
-    },
+    content,
     reactions: [],
     mentions: { memberIds: [], roleIds: [], channelIds: [] },
     publicKey: spaceKeys.inboxSigningKey.public_key,
@@ -356,18 +362,37 @@ async function cmdListen(spaceId, duration = 0) {
       const plaintext = new TextDecoder().decode(new Uint8Array(decrypted));
       const parsed = JSON.parse(plaintext);
       
-      if (parsed.type === 'message' && parsed.message?.content?.text) {
+      if (parsed.type === 'message' && parsed.message) {
         const message = parsed.message;
-        const sender = message.content.senderId;
+        const content = message.content;
+        const sender = content.senderId;
         const isMe = sender === spaceKeys.inboxAddress;
         const displaySender = isMe ? 'Me' : sender.substring(0, 12) + '...';
+        const shortMsgId = message.messageId?.substring(0, 8) || '?';
         
         // Verify message signature (only reliable for our own messages due to JSON serialization differences)
         const sigResult = verifyMessageSignature(message);
-        // Show ✓ for verified, blank for unverified (don't alarm on mobile interop issues)
         const sigStatus = sigResult.valid ? '✓' : ' ';
         
-        console.log(`[${new Date().toLocaleTimeString()}]${sigStatus} ${displaySender}: ${message.content.text}`);
+        // Handle different content types
+        if (content.type === 'post' && content.text) {
+          const replyInfo = content.repliesToMessageId ? ` ↩️ ${content.repliesToMessageId.substring(0, 8)}` : '';
+          console.log(`[${new Date().toLocaleTimeString()}]${sigStatus} ${displaySender}: ${content.text}${replyInfo}`);
+          console.log(`    id: ${message.messageId}`);
+        } else if (content.type === 'reaction') {
+          console.log(`[${new Date().toLocaleTimeString()}] ${displaySender} reacted ${content.reaction} to ${content.messageId?.substring(0, 12)}...`);
+        } else if (content.type === 'remove-reaction') {
+          console.log(`[${new Date().toLocaleTimeString()}] ${displaySender} removed ${content.reaction} from ${content.messageId?.substring(0, 12)}...`);
+        } else if (content.type === 'remove-message') {
+          console.log(`[${new Date().toLocaleTimeString()}] ${displaySender} deleted message ${content.removeMessageId?.substring(0, 12)}...`);
+        } else if (content.type === 'embed') {
+          const mediaInfo = content.imageUrl ? '🖼️ image' : content.videoUrl ? '🎥 video' : '📎 embed';
+          console.log(`[${new Date().toLocaleTimeString()}]${sigStatus} ${displaySender}: ${mediaInfo}`);
+          console.log(`    id: ${message.messageId}`);
+        } else {
+          // Unknown content type, show raw
+          console.log(`[${new Date().toLocaleTimeString()}] ${displaySender}: [${content.type}]`);
+        }
       }
     } catch (err) {
       // Silently ignore decrypt errors (control messages, etc)
@@ -479,6 +504,119 @@ async function cmdChannels(spaceId) {
   }
 }
 
+// ============ Reactions & Message Actions ============
+
+/**
+ * Send a message with specific content type (used by react, unreact, delete)
+ */
+async function sendSpaceMessage(spaceId, content, channelId = null) {
+  const spaceKeys = await loadSpaceKeys(spaceId);
+  
+  if (!channelId) {
+    channelId = spaceKeys.defaultChannelId || 'QmZWt1AYqsAMLuLg8iwmhmVqRjQnbAAWF7AHGPkWPNXEoc';
+  }
+  
+  const timestamp = Date.now();
+  const nonce = bytesToHex(randomBytes(16));
+  const idContent = `${spaceId}:${channelId}:${spaceKeys.inboxAddress}:${nonce}:${timestamp}`;
+  const messageId = bytesToHex(createHash('sha256').update(idContent).digest());
+  
+  const message = {
+    channelId,
+    spaceId,
+    messageId,
+    digestAlgorithm: 'sha256',
+    nonce,
+    createdDate: timestamp,
+    modifiedDate: timestamp,
+    lastModifiedHash: '',
+    content: { ...content, senderId: spaceKeys.inboxAddress },
+    reactions: [],
+    mentions: { memberIds: [], roleIds: [], channelIds: [] },
+    publicKey: spaceKeys.inboxSigningKey.public_key,
+  };
+  
+  // Sign message
+  const msgBytes = new TextEncoder().encode(JSON.stringify(message));
+  const sig = signEd448(
+    bytesToBase64(hexToBytes(spaceKeys.inboxSigningKey.private_key)),
+    bytesToBase64(msgBytes)
+  );
+  message.signature = bytesToHex(base64ToBytes(sig));
+  
+  // Wrap in hub payload
+  const hubPayload = JSON.stringify({ type: 'message', message });
+  
+  // Encrypt with config key
+  const ephemeral = generateX448();
+  const configPrivKey = hexToBytes(spaceKeys.configPrivateKey);
+  const configPubKeyB64 = getX448PubKey(bytesToBase64(configPrivKey));
+  const configPubKey = base64ToBytes(configPubKeyB64);
+  
+  const encrypted = encryptInboxMessageBytes(
+    [...configPubKey],
+    ephemeral.private_key,
+    [...new TextEncoder().encode(hubPayload)]
+  );
+  
+  // Sign with hub key
+  const hubSig = signEd448(
+    bytesToBase64(hexToBytes(spaceKeys.hubPrivateKey)),
+    bytesToBase64(new TextEncoder().encode(encrypted))
+  );
+  
+  // Build sealed message
+  const wsEnvelope = JSON.stringify({
+    type: 'group',
+    hub_address: spaceKeys.hubAddress,
+    hub_public_key: spaceKeys.hubPublicKey,
+    ephemeral_public_key: bytesToHex(new Uint8Array(ephemeral.public_key)),
+    envelope: encrypted,
+    hub_signature: bytesToHex(base64ToBytes(hubSig)),
+  });
+  
+  // Send via WebSocket
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(WS_URL);
+    
+    ws.on('open', () => {
+      ws.send(wsEnvelope);
+      setTimeout(() => {
+        ws.close();
+        resolve();
+      }, 1000);
+    });
+    
+    ws.on('error', reject);
+  });
+}
+
+async function cmdReact(spaceId, targetMessageId, emoji, channelId = null) {
+  await sendSpaceMessage(spaceId, {
+    type: 'reaction',
+    reaction: emoji,
+    messageId: targetMessageId,
+  }, channelId);
+  console.log(`✅ Reacted with ${emoji}`);
+}
+
+async function cmdUnreact(spaceId, targetMessageId, emoji, channelId = null) {
+  await sendSpaceMessage(spaceId, {
+    type: 'remove-reaction',
+    reaction: emoji,
+    messageId: targetMessageId,
+  }, channelId);
+  console.log(`✅ Removed reaction ${emoji}`);
+}
+
+async function cmdDelete(spaceId, targetMessageId, channelId = null) {
+  await sendSpaceMessage(spaceId, {
+    type: 'remove-message',
+    removeMessageId: targetMessageId,
+  }, channelId);
+  console.log(`✅ Deleted message ${targetMessageId.substring(0, 16)}...`);
+}
+
 // ============ Main ============
 
 async function main() {
@@ -489,18 +627,28 @@ async function main() {
 Quorum Space CLI
 
 Commands:
-  join <invite-url>                    Join a space from invite link
-  send <space-id> <text> [-c channel]  Send a message to a space
-  listen <space-id>                    Listen for messages (Ctrl+C to stop)
-  list                                 List joined spaces
-  channels <space-id>                  List channels in a space
+  join <invite-url>                        Join a space from invite link
+  send <space-id> <text> [options]         Send a message to a space
+  listen <space-id>                        Listen for messages (Ctrl+C to stop)
+  list                                     List joined spaces
+  channels <space-id>                      List channels in a space
+  react <space-id> <msg-id> <emoji>        React to a message
+  unreact <space-id> <msg-id> <emoji>      Remove a reaction
+  delete <space-id> <msg-id>               Delete a message
+
+Send options:
+  -c <channel-id>                          Send to specific channel
+  -r <message-id>                          Reply to a message
 
 Examples:
   node space.mjs join "https://app.quorummessenger.com/#spaceId=..."
   node space.mjs send QmaQqr... "Hello!"
   node space.mjs send QmaQqr... "Hello!" -c QmZWt1...
+  node space.mjs send QmaQqr... "Reply!" -r abc123...
+  node space.mjs react QmaQqr... abc123... 👍
+  node space.mjs unreact QmaQqr... abc123... 👍
+  node space.mjs delete QmaQqr... abc123...
   node space.mjs listen QmaQqr...
-  node space.mjs channels QmaQqr...
 `);
     return;
   }
@@ -513,19 +661,29 @@ Examples:
       await cmdJoin(args[0]);
       break;
     case 'send': {
-      if (!args[0]) throw new Error('Usage: space send <space-id> <text> [-c channel-id]');
+      if (!args[0]) throw new Error('Usage: space send <space-id> <text> [-c channel-id] [-r reply-to-id]');
       const spaceId = args[0];
-      // Parse -c flag for channel
+      // Parse flags
       const cIndex = args.indexOf('-c');
+      const rIndex = args.indexOf('-r');
       let channelId = null;
+      let replyToId = null;
       let textParts = args.slice(1);
+      
+      // Extract -c flag
       if (cIndex > 0) {
         channelId = args[cIndex + 1];
-        textParts = args.slice(1, cIndex);
+        textParts = textParts.filter((_, i) => i + 1 !== cIndex && i + 1 !== cIndex + 1);
       }
+      // Extract -r flag  
+      if (rIndex > 0) {
+        replyToId = args[rIndex + 1];
+        textParts = textParts.filter((_, i) => i + 1 !== rIndex && i + 1 !== rIndex + 1);
+      }
+      
       const text = textParts.join(' ');
-      if (!text) throw new Error('Usage: space send <space-id> <text> [-c channel-id]');
-      await cmdSend(spaceId, text, channelId);
+      if (!text) throw new Error('Usage: space send <space-id> <text> [-c channel-id] [-r reply-to-id]');
+      await cmdSend(spaceId, text, channelId, replyToId);
       break;
     }
     case 'listen':
@@ -539,6 +697,33 @@ Examples:
       if (!args[0]) throw new Error('Usage: space channels <space-id>');
       await cmdChannels(args[0]);
       break;
+    case 'react': {
+      if (!args[0] || !args[1] || !args[2]) {
+        throw new Error('Usage: space react <space-id> <message-id> <emoji> [-c channel-id]');
+      }
+      const cIndex = args.indexOf('-c');
+      const channelId = cIndex > 0 ? args[cIndex + 1] : null;
+      await cmdReact(args[0], args[1], args[2], channelId);
+      break;
+    }
+    case 'unreact': {
+      if (!args[0] || !args[1] || !args[2]) {
+        throw new Error('Usage: space unreact <space-id> <message-id> <emoji> [-c channel-id]');
+      }
+      const cIndex = args.indexOf('-c');
+      const channelId = cIndex > 0 ? args[cIndex + 1] : null;
+      await cmdUnreact(args[0], args[1], args[2], channelId);
+      break;
+    }
+    case 'delete': {
+      if (!args[0] || !args[1]) {
+        throw new Error('Usage: space delete <space-id> <message-id> [-c channel-id]');
+      }
+      const cIndex = args.indexOf('-c');
+      const channelId = cIndex > 0 ? args[cIndex + 1] : null;
+      await cmdDelete(args[0], args[1], channelId);
+      break;
+    }
     default:
       console.error('Unknown command:', cmd);
       process.exit(1);
