@@ -7,7 +7,6 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
-import { readFileSync, existsSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -17,20 +16,21 @@ import {
   CryptoErrorType
 } from './src/crypto.mjs';
 import { QuorumAPI } from './src/api.mjs';
+import { createSecureStore } from './src/secure-store.mjs';
 
 const DATA_DIR = join(homedir(), '.quorum-client');
 const TIMEOUT = (parseInt(process.argv[2]) || 120) * 1000;
 
-// Load identity
-const deviceKeysetPath = join(DATA_DIR, 'device-keyset.json');
-if (!existsSync(deviceKeysetPath)) {
+await initCrypto();
+
+// Load keys from secure store (keychain-backed)
+const store = await createSecureStore(DATA_DIR);
+const deviceKeyset = await store.getDeviceKeyset();
+
+if (!deviceKeyset) {
   console.error('No identity found. Run: node cli.mjs register <name>');
   process.exit(1);
 }
-
-await initCrypto();
-
-const deviceKeyset = JSON.parse(readFileSync(deviceKeysetPath, 'utf-8'));
 const INBOX = deviceKeyset.inbox_address;
 const api = new QuorumAPI();
 

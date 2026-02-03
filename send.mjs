@@ -16,14 +16,9 @@ import {
   doubleRatchetEncrypt, generateX448, encryptInboxMessageBytes 
 } from './src/crypto.mjs';
 import { QuorumAPI } from './src/api.mjs';
+import { createSecureStore } from './src/secure-store.mjs';
 
 const DATA_DIR = join(homedir(), '.quorum-client');
-
-// Check for identity
-if (!existsSync(join(DATA_DIR, 'device-keyset.json'))) {
-  console.error('No identity found. Run: node cli.mjs register <name>');
-  process.exit(1);
-}
 
 const message = process.argv[2];
 const recipientAddr = process.argv[3];
@@ -35,8 +30,15 @@ if (!message || !recipientAddr) {
 
 await initCrypto();
 
-const deviceKeyset = JSON.parse(readFileSync(join(DATA_DIR, 'device-keyset.json'), 'utf-8'));
-const registration = JSON.parse(readFileSync(join(DATA_DIR, 'registration.json'), 'utf-8'));
+// Load keys from secure store (keychain-backed)
+const store = await createSecureStore(DATA_DIR);
+const deviceKeyset = await store.getDeviceKeyset();
+const registration = store.getRegistration();
+
+if (!deviceKeyset || !registration) {
+  console.error('No identity found. Run: node cli.mjs register <name>');
+  process.exit(1);
+}
 
 const api = new QuorumAPI();
 let recipient;
