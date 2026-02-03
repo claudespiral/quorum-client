@@ -10,10 +10,19 @@
   "scripts": {
     "test": "node test/smoke.mjs"
   },
-  "keywords": ["quilibrium", "quorum", "e2ee", "messenger", "headless"],
+  "keywords": [
+    "quilibrium",
+    "quorum",
+    "e2ee",
+    "messenger",
+    "headless"
+  ],
   "author": "claudespiral",
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
   }
 }
