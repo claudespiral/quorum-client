@@ -41,6 +41,10 @@ export function getX448PubKey(privKeyB64) {
   return JSON.parse(wasm.js_get_pubkey_x448(privKeyB64));
 }
 
+export function getEd448PubKey(privKeyB64) {
+  return JSON.parse(wasm.js_get_pubkey_ed448(privKeyB64));
+}
+
 // ============ Signing ============
 
 export function signEd448(privKeyB64, messageB64) {
