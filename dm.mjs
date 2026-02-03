@@ -270,7 +270,10 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
 }
 
 async function sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration) {
-  // Build message with full structure (matching mobile app format)
+  // For follow-up messages to device inbox (before we know conversation inbox),
+  // we MUST wrap in InitializationEnvelope format so the device inbox processing
+  // path can handle it correctly. The mobile app's init processing path can
+  // handle messages where the inner content is a DR envelope (trial decryption).
   const messageId = randomUUID();
   const now = Date.now();
   const messagePayload = JSON.stringify({
@@ -287,16 +290,16 @@ async function sendFollowUpMessage(recipientAddress, content, session, device, s
     mentions: { memberIds: [], roleIds: [], channelIds: [] },
   });
   
-  // Ratchet state is stored as a JSON string - pass it directly to WASM
-  // (The WASM expects a string, not a parsed object)
   const ratchetState = session.ratchet_state;
   
-  // Encrypt with existing ratchet (continues the conversation)
+  // Encrypt with existing ratchet - produces Type 2 envelope (protocol_identifier: 512)
   const { ratchet_state: newState, envelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
   
   const ephemeralKey = generateX448();
   
-  // Build payload with return info (in case they need to reply)
+  // Wrap in InitializationEnvelope format so device inbox path can process it
+  // The mobile app will unseal this, see it has user_address, and try to process
+  // The inner 'message' field contains the DR envelope which it will decrypt
   const payload = JSON.stringify({
     return_inbox_address: deviceKeyset.inbox_address,
     return_inbox_encryption_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_encryption_key.public_key)),
@@ -563,29 +566,32 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
       // Get or create session for this sender
       const senderAddress = outer.user_address || outer.return_inbox_address;
       let session = store.getSession(senderAddress);
+      const isInitEnvelope = outer.identity_public_key && outer.return_inbox_address;
       
-      if (!session && outer.return_inbox_address) {
-        // Initialize session from received message
+      // Helper to create fresh session from init envelope
+      const createFreshSession = () => {
         const senderIdentityKey = hexToBytes(outer.identity_public_key);
-        const senderPreKey = ephPubKey;
+        const senderEphemeralKey = ephPubKey;
         
         const sessionKeyB64 = receiverX3DH(
           deviceKeyset.identity_key.private_key,
           deviceKeyset.pre_key.private_key,
           [...senderIdentityKey],
-          [...senderPreKey],
+          [...senderEphemeralKey],
           96
         );
         
         const rootKey = [...Buffer.from(sessionKeyB64, 'base64')];
         
-        session = {
+        // NOTE: Header key slices are NOT swapped - WASM handles perspective via is_sender
+        return {
           ratchet_state: newDoubleRatchet({
             session_key: rootKey.slice(0, 32),
-            sending_header_key: rootKey.slice(64, 96),
-            next_receiving_header_key: rootKey.slice(32, 64),
+            sending_header_key: rootKey.slice(32, 64),       // Same as sender
+            next_receiving_header_key: rootKey.slice(64, 96), // Same as sender
             is_sender: false,
-            receiving_ephemeral_key: [...senderPreKey],
+            sending_ephemeral_private_key: deviceKeyset.pre_key.private_key, // Our pre-key
+            receiving_ephemeral_key: [...senderEphemeralKey],
           }),
           sending_inbox: {
             inbox_address: outer.return_inbox_address,
@@ -594,18 +600,44 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
           recipient_address: senderAddress,
           sender_name: outer.display_name || senderAddress.substring(0, 12),
         };
+      };
+      
+      // Helper to safely try decryption
+      const tryDecrypt = (ratchetState, envelope) => {
+        try {
+          const result = doubleRatchetDecrypt(ratchetState, envelope);
+          // WASM returns error messages in result instead of throwing
+          if (result.message.includes('Decryption failed') || 
+              result.message.includes('aead') ||
+              result.message.includes('invalid')) {
+            return null;
+          }
+          return result;
+        } catch (e) {
+          return null;
+        }
+      };
+      
+      let decryptResult = null;
+      
+      // Strategy: try existing session first, fall back to fresh if it fails
+      if (session) {
+        decryptResult = tryDecrypt(session.ratchet_state, outer.message);
       }
       
-      if (!session) {
-        console.log(`[${new Date().toLocaleTimeString()}] Unknown sender, cannot decrypt`);
+      // If existing session failed and this is an init envelope, try fresh session
+      // (handles case where sender reset their session)
+      if (!decryptResult && isInitEnvelope) {
+        session = createFreshSession();
+        decryptResult = tryDecrypt(session.ratchet_state, outer.message);
+      }
+      
+      if (!decryptResult || !session) {
+        if (process.env.DEBUG) console.log(`[${new Date().toLocaleTimeString()}] Could not decrypt message`);
         return;
       }
       
-      // Decrypt the actual message
-      const { ratchet_state: newState, plaintext } = doubleRatchetDecrypt(
-        session.ratchet_state,
-        outer.message
-      );
+      const { ratchet_state: newState, message: plaintext } = decryptResult;
       
       // Update session
       session.ratchet_state = newState;
