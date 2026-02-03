@@ -194,16 +194,12 @@ async function cmdJoin(inviteUrl) {
   console.log('Keys saved to:', savedPath);
 }
 
-async function cmdSend(spaceId, text) {
+async function cmdSend(spaceId, text, channelId = null) {
   const spaceKeys = loadSpaceKeys(spaceId);
   
-  // Default channel - get from template or use known one
-  // TODO: Parse from manifest
-  let channelId = 'QmZWt1AYqsAMLuLg8iwmhmVqRjQnbAAWF7AHGPkWPNXEoc';
-  
-  // Try to get channel from stored info
-  if (spaceKeys.defaultChannelId) {
-    channelId = spaceKeys.defaultChannelId;
+  // Use provided channel or fall back to default
+  if (!channelId) {
+    channelId = spaceKeys.defaultChannelId || 'QmZWt1AYqsAMLuLg8iwmhmVqRjQnbAAWF7AHGPkWPNXEoc';
   }
   
   const timestamp = Date.now();
@@ -368,6 +364,81 @@ function cmdList() {
   }
 }
 
+async function cmdChannels(spaceId) {
+  const spaceKeys = loadSpaceKeys(spaceId);
+  
+  // Try to get channels from stored manifest
+  if (spaceKeys.channels && spaceKeys.channels.length > 0) {
+    console.log(`Channels in ${spaceId}:\n`);
+    for (const ch of spaceKeys.channels) {
+      const isDefault = ch.channelId === spaceKeys.defaultChannelId ? ' (default)' : '';
+      console.log(`  #${ch.channelName}${isDefault}`);
+      console.log(`    ID: ${ch.channelId}`);
+      if (ch.channelTopic) console.log(`    Topic: ${ch.channelTopic}`);
+      console.log();
+    }
+    return;
+  }
+  
+  // Try to fetch and decrypt manifest
+  console.log('Fetching space manifest...');
+  try {
+    const manifestRes = await fetch(`${API_BASE}/spaces/${spaceId}/manifest`);
+    if (!manifestRes.ok) {
+      console.log('Could not fetch manifest. Channels unknown.');
+      console.log(`Default channel: ${spaceKeys.defaultChannelId || 'unknown'}`);
+      return;
+    }
+    
+    const manifest = await manifestRes.json();
+    
+    // Decrypt manifest using config key
+    const configPrivKey = hexToBytes(spaceKeys.configPrivateKey);
+    const ephPubKey = hexToBytes(manifest.ephemeral_public_key);
+    const innerEnvelope = JSON.parse(manifest.space_manifest);
+    
+    const decrypted = decryptInboxMessage(
+      [...configPrivKey],
+      [...ephPubKey],
+      innerEnvelope
+    );
+    
+    const spaceData = JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)));
+    
+    // Extract channels from groups
+    const channels = [];
+    for (const group of (spaceData.groups || [])) {
+      for (const ch of (group.channels || [])) {
+        channels.push({
+          groupName: group.groupName,
+          channelId: ch.channelId,
+          channelName: ch.channelName,
+          channelTopic: ch.channelTopic,
+        });
+      }
+    }
+    
+    // Save channels for future use
+    spaceKeys.channels = channels;
+    spaceKeys.defaultChannelId = spaceData.defaultChannelId;
+    spaceKeys.spaceName = spaceData.spaceName;
+    saveSpaceKeys(spaceId, spaceKeys);
+    
+    console.log(`Space: ${spaceData.spaceName || spaceId}\n`);
+    console.log('Channels:');
+    for (const ch of channels) {
+      const isDefault = ch.channelId === spaceData.defaultChannelId ? ' (default)' : '';
+      console.log(`  #${ch.channelName}${isDefault} [${ch.groupName}]`);
+      console.log(`    ID: ${ch.channelId}`);
+      if (ch.channelTopic) console.log(`    Topic: ${ch.channelTopic}`);
+      console.log();
+    }
+  } catch (err) {
+    console.error('Error fetching channels:', err.message);
+    console.log(`Default channel: ${spaceKeys.defaultChannelId || 'unknown'}`);
+  }
+}
+
 // ============ Main ============
 
 async function main() {
@@ -378,15 +449,18 @@ async function main() {
 Quorum Space CLI
 
 Commands:
-  join <invite-url>       Join a space from invite link
-  send <space-id> <text>  Send a message to a space
-  listen <space-id>       Listen for messages (Ctrl+C to stop)
-  list                    List joined spaces
+  join <invite-url>                    Join a space from invite link
+  send <space-id> <text> [-c channel]  Send a message to a space
+  listen <space-id>                    Listen for messages (Ctrl+C to stop)
+  list                                 List joined spaces
+  channels <space-id>                  List channels in a space
 
 Examples:
   node space.mjs join "https://app.quorummessenger.com/#spaceId=..."
   node space.mjs send QmaQqr... "Hello!"
+  node space.mjs send QmaQqr... "Hello!" -c QmZWt1...
   node space.mjs listen QmaQqr...
+  node space.mjs channels QmaQqr...
 `);
     return;
   }
@@ -398,16 +472,32 @@ Examples:
       if (!args[0]) throw new Error('Usage: space join <invite-url>');
       await cmdJoin(args[0]);
       break;
-    case 'send':
-      if (!args[0] || !args[1]) throw new Error('Usage: space send <space-id> <text>');
-      await cmdSend(args[0], args.slice(1).join(' '));
+    case 'send': {
+      if (!args[0]) throw new Error('Usage: space send <space-id> <text> [-c channel-id]');
+      const spaceId = args[0];
+      // Parse -c flag for channel
+      const cIndex = args.indexOf('-c');
+      let channelId = null;
+      let textParts = args.slice(1);
+      if (cIndex > 0) {
+        channelId = args[cIndex + 1];
+        textParts = args.slice(1, cIndex);
+      }
+      const text = textParts.join(' ');
+      if (!text) throw new Error('Usage: space send <space-id> <text> [-c channel-id]');
+      await cmdSend(spaceId, text, channelId);
       break;
+    }
     case 'listen':
       if (!args[0]) throw new Error('Usage: space listen <space-id>');
       await cmdListen(args[0], parseInt(args[1]) || 0);
       break;
     case 'list':
       cmdList();
+      break;
+    case 'channels':
+      if (!args[0]) throw new Error('Usage: space channels <space-id>');
+      await cmdChannels(args[0]);
       break;
     default:
       console.error('Unknown command:', cmd);
