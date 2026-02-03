@@ -11,6 +11,7 @@
 
 import { QuorumStore } from './store.mjs';
 import * as keychain from './keychain.mjs';
+import path from 'path';
 
 export class SecureStore {
   constructor(dataDir, useKeychain = true) {
@@ -26,6 +27,9 @@ export class SecureStore {
         console.log('🔐 Using OS keychain for key storage');
         // Offer migration if we have plaintext keys
         await keychain.migrateToKeychain(this.fileStore);
+        // Also migrate space keys
+        const spacesDir = path.join(this.fileStore.dataDir, '..', 'spaces');
+        await keychain.migrateSpacesToKeychain(spacesDir);
       } else {
         console.warn('⚠️  OS keychain not available, using plaintext storage');
         console.warn('   Keys stored in ~/.quorum-client/keys/ (unencrypted)');
@@ -112,6 +116,95 @@ export class SecureStore {
 
   load(filename) {
     return this.fileStore.load(filename);
+  }
+
+  // ============ Space Keys (keychain-backed) ============
+
+  async getSpaceKeys(spaceId) {
+    if (this.keychainAvailable) {
+      const keys = await keychain.getSpaceKeys(spaceId);
+      if (keys) return keys;
+    }
+    // Fall back to file
+    return this._loadSpaceKeysFromFile(spaceId);
+  }
+
+  async saveSpaceKeys(spaceId, keys) {
+    if (this.keychainAvailable) {
+      await keychain.saveSpaceKeys(spaceId, keys);
+    } else {
+      // Save to file if keychain not available
+      this._saveSpaceKeysToFile(spaceId, keys);
+    }
+  }
+
+  async deleteSpaceKeys(spaceId) {
+    if (this.keychainAvailable) {
+      await keychain.deleteSpaceKeys(spaceId);
+    }
+    // Also try to delete file if it exists
+    this._deleteSpaceKeysFile(spaceId);
+  }
+
+  async listSpaces() {
+    if (this.keychainAvailable) {
+      return await keychain.listSpaces();
+    }
+    // Fall back to file listing
+    return this._listSpacesFromFiles();
+  }
+
+  // File-based fallbacks for spaces
+  _getSpacesDir() {
+    const spacesDir = path.join(this.fileStore.dataDir, '..', 'spaces');
+    return spacesDir;
+  }
+
+  _loadSpaceKeysFromFile(spaceId) {
+    const fs = require('fs');
+    const keyPath = path.join(this._getSpacesDir(), `${spaceId}.json`);
+    if (!fs.existsSync(keyPath)) return null;
+    try {
+      return JSON.parse(fs.readFileSync(keyPath, 'utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  _saveSpaceKeysToFile(spaceId, keys) {
+    const fs = require('fs');
+    const spacesDir = this._getSpacesDir();
+    if (!fs.existsSync(spacesDir)) {
+      fs.mkdirSync(spacesDir, { recursive: true, mode: 0o700 });
+    }
+    const keyPath = path.join(spacesDir, `${spaceId}.json`);
+    fs.writeFileSync(keyPath, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  }
+
+  _deleteSpaceKeysFile(spaceId) {
+    const fs = require('fs');
+    const keyPath = path.join(this._getSpacesDir(), `${spaceId}.json`);
+    if (fs.existsSync(keyPath)) {
+      fs.unlinkSync(keyPath);
+    }
+  }
+
+  _listSpacesFromFiles() {
+    const fs = require('fs');
+    const spacesDir = this._getSpacesDir();
+    if (!fs.existsSync(spacesDir)) return [];
+    
+    const files = fs.readdirSync(spacesDir).filter(f => f.endsWith('.json'));
+    return files.map(f => {
+      const keys = this._loadSpaceKeysFromFile(f.replace('.json', ''));
+      if (!keys) return null;
+      return {
+        spaceId: keys.spaceId,
+        spaceName: keys.spaceName,
+        inboxAddress: keys.inboxAddress,
+        joinedAt: keys.joinedAt,
+      };
+    }).filter(Boolean);
   }
 
   // ============ Keychain management ============

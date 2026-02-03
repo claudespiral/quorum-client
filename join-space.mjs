@@ -6,7 +6,6 @@
  */
 
 import { createHash } from 'crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -23,8 +22,10 @@ import {
   base58Encode
 } from './src/crypto.mjs';
 
+import { createSecureStore } from './src/secure-store.mjs';
+
 const API_BASE = 'https://api.quorummessenger.com';
-const SPACE_KEYS_DIR = path.join(process.env.HOME, '.quorum-client', 'spaces');
+const DATA_DIR = path.join(process.env.HOME, '.quorum-client', 'keys');
 
 // ============ Helpers ============
 
@@ -233,11 +234,8 @@ async function main() {
   
   // Save all keys
   console.log('\n=== Saving Keys ===');
-  if (!existsSync(SPACE_KEYS_DIR)) {
-    mkdirSync(SPACE_KEYS_DIR, { recursive: true });
-  }
+  const store = await createSecureStore(DATA_DIR);
   
-  const spaceKeysPath = path.join(SPACE_KEYS_DIR, `${invite.spaceId}.json`);
   const spaceKeys = {
     spaceId: invite.spaceId,
     hubAddress,
@@ -258,8 +256,8 @@ async function main() {
     joinedAt: Date.now(),
   };
   
-  writeFileSync(spaceKeysPath, JSON.stringify(spaceKeys, null, 2));
-  console.log('Saved to:', spaceKeysPath);
+  await store.saveSpaceKeys(invite.spaceId, spaceKeys);
+  console.log('Saved to: keychain:space:' + invite.spaceId);
   
   console.log('\n=== Join Complete ===');
   console.log('Space ID:', invite.spaceId);

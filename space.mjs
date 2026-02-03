@@ -15,7 +15,6 @@
  */
 
 import WebSocket from 'ws';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { createHash, randomBytes } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -34,9 +33,21 @@ import {
   decryptInboxMessage
 } from './src/crypto.mjs';
 
+import { createSecureStore } from './src/secure-store.mjs';
+
 const API_BASE = 'https://api.quorummessenger.com';
 const WS_URL = 'wss://api.quorummessenger.com/ws';
-const SPACE_KEYS_DIR = path.join(process.env.HOME, '.quorum-client', 'spaces');
+const DATA_DIR = path.join(process.env.HOME, '.quorum-client', 'keys');
+
+// Initialized lazily
+let store = null;
+
+async function getStore() {
+  if (!store) {
+    store = await createSecureStore(DATA_DIR);
+  }
+  return store;
+}
 
 // ============ Helpers ============
 
@@ -60,21 +71,19 @@ function base64ToBytes(b64) {
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
 
-function loadSpaceKeys(spaceId) {
-  const keyPath = path.join(SPACE_KEYS_DIR, `${spaceId}.json`);
-  if (!existsSync(keyPath)) {
+async function loadSpaceKeys(spaceId) {
+  const s = await getStore();
+  const keys = await s.getSpaceKeys(spaceId);
+  if (!keys) {
     throw new Error(`Space not found: ${spaceId}. Join it first with: space join <invite-url>`);
   }
-  return JSON.parse(readFileSync(keyPath, 'utf8'));
+  return keys;
 }
 
-function saveSpaceKeys(spaceId, keys) {
-  if (!existsSync(SPACE_KEYS_DIR)) {
-    mkdirSync(SPACE_KEYS_DIR, { recursive: true });
-  }
-  const keyPath = path.join(SPACE_KEYS_DIR, `${spaceId}.json`);
-  writeFileSync(keyPath, JSON.stringify(keys, null, 2));
-  return keyPath;
+async function saveSpaceKeys(spaceId, keys) {
+  const s = await getStore();
+  await s.saveSpaceKeys(spaceId, keys);
+  return `keychain:space:${spaceId}`;
 }
 
 // ============ Commands ============
@@ -189,13 +198,13 @@ async function cmdJoin(inviteUrl) {
     joinedAt: Date.now(),
   };
   
-  const savedPath = saveSpaceKeys(invite.spaceId, spaceKeys);
+  const savedPath = await saveSpaceKeys(invite.spaceId, spaceKeys);
   console.log('\n✅ Joined space:', invite.spaceId);
   console.log('Keys saved to:', savedPath);
 }
 
 async function cmdSend(spaceId, text, channelId = null) {
-  const spaceKeys = loadSpaceKeys(spaceId);
+  const spaceKeys = await loadSpaceKeys(spaceId);
   
   // Use provided channel or fall back to default
   if (!channelId) {
@@ -284,7 +293,7 @@ async function cmdSend(spaceId, text, channelId = null) {
 }
 
 async function cmdListen(spaceId, duration = 0) {
-  const spaceKeys = loadSpaceKeys(spaceId);
+  const spaceKeys = await loadSpaceKeys(spaceId);
   
   console.log('Space:', spaceId);
   console.log('Inbox:', spaceKeys.inboxAddress);
@@ -342,30 +351,27 @@ async function cmdListen(spaceId, duration = 0) {
   }
 }
 
-function cmdList() {
-  if (!existsSync(SPACE_KEYS_DIR)) {
-    console.log('No spaces joined yet.');
-    return;
-  }
+async function cmdList() {
+  const s = await getStore();
+  const spaces = await s.listSpaces();
   
-  const files = readdirSync(SPACE_KEYS_DIR).filter(f => f.endsWith('.json'));
-  if (files.length === 0) {
+  if (spaces.length === 0) {
     console.log('No spaces joined yet.');
     return;
   }
   
   console.log('Joined spaces:\n');
-  for (const file of files) {
-    const keys = JSON.parse(readFileSync(path.join(SPACE_KEYS_DIR, file), 'utf8'));
-    console.log(`  ${keys.spaceId}`);
-    console.log(`    Inbox: ${keys.inboxAddress}`);
-    console.log(`    Joined: ${new Date(keys.joinedAt).toLocaleString()}`);
+  for (const space of spaces) {
+    console.log(`  ${space.spaceId}`);
+    if (space.spaceName) console.log(`    Name: ${space.spaceName}`);
+    console.log(`    Inbox: ${space.inboxAddress}`);
+    console.log(`    Joined: ${new Date(space.joinedAt).toLocaleString()}`);
     console.log();
   }
 }
 
 async function cmdChannels(spaceId) {
-  const spaceKeys = loadSpaceKeys(spaceId);
+  const spaceKeys = await loadSpaceKeys(spaceId);
   
   // Try to get channels from stored manifest
   if (spaceKeys.channels && spaceKeys.channels.length > 0) {
@@ -422,7 +428,7 @@ async function cmdChannels(spaceId) {
     spaceKeys.channels = channels;
     spaceKeys.defaultChannelId = spaceData.defaultChannelId;
     spaceKeys.spaceName = spaceData.spaceName;
-    saveSpaceKeys(spaceId, spaceKeys);
+    await saveSpaceKeys(spaceId, spaceKeys);
     
     console.log(`Space: ${spaceData.spaceName || spaceId}\n`);
     console.log('Channels:');
@@ -493,7 +499,7 @@ Examples:
       await cmdListen(args[0], parseInt(args[1]) || 0);
       break;
     case 'list':
-      cmdList();
+      await cmdList();
       break;
     case 'channels':
       if (!args[0]) throw new Error('Usage: space channels <space-id>');

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import WebSocket from 'ws';
-import { readFileSync } from 'fs';
+import path from 'path';
 import { initCrypto, decryptInboxMessage } from './src/crypto.mjs';
+import { createSecureStore } from './src/secure-store.mjs';
 
 const SPACE_ID = process.argv[2] || 'QmaQqr719AQNnMUxzqiwEpzJEWFuJwRQdsr2K3D3aZvVoa';
+const DATA_DIR = path.join(process.env.HOME, '.quorum-client', 'keys');
 
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
@@ -16,9 +18,11 @@ function hexToBytes(hex) {
 async function main() {
   await initCrypto();
   
-  const spaceKeys = JSON.parse(readFileSync(
-    `${process.env.HOME}/.quorum-client/spaces/${SPACE_ID}.json`
-  ));
+  const store = await createSecureStore(DATA_DIR);
+  const spaceKeys = await store.getSpaceKeys(SPACE_ID);
+  if (!spaceKeys) {
+    throw new Error(`Space not found: ${SPACE_ID}. Join it first.`);
+  }
   
   console.log('Space:', SPACE_ID);
   console.log('Inbox:', spaceKeys.inboxAddress);

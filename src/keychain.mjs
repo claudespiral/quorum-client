@@ -18,6 +18,8 @@ const SERVICE_NAME = 'quorum-client';
 const KEYCHAIN_KEYS = {
   USER_KEYSET: 'user-keyset',
   DEVICE_KEYSET: 'device-keyset',
+  SPACE_INDEX: 'space-index',  // Array of spaceIds
+  // Individual spaces: 'space:<spaceId>'
 };
 
 /**
@@ -87,6 +89,78 @@ export async function saveDeviceKeyset(keyset) {
   await setSecret(KEYCHAIN_KEYS.DEVICE_KEYSET, keyset);
 }
 
+// ============ Space key management ============
+
+/**
+ * Get the list of all space IDs stored in keychain
+ */
+export async function getSpaceIndex() {
+  const index = await getSecret(KEYCHAIN_KEYS.SPACE_INDEX);
+  return index || [];
+}
+
+/**
+ * Save the space index
+ */
+async function saveSpaceIndex(spaceIds) {
+  await setSecret(KEYCHAIN_KEYS.SPACE_INDEX, spaceIds);
+}
+
+/**
+ * Get keys for a specific space
+ */
+export async function getSpaceKeys(spaceId) {
+  return await getSecret(`space:${spaceId}`);
+}
+
+/**
+ * Save keys for a space (also updates index)
+ */
+export async function saveSpaceKeys(spaceId, keys) {
+  // Save the keys
+  await setSecret(`space:${spaceId}`, keys);
+  
+  // Update index if not already present
+  const index = await getSpaceIndex();
+  if (!index.includes(spaceId)) {
+    index.push(spaceId);
+    await saveSpaceIndex(index);
+  }
+}
+
+/**
+ * Delete keys for a space (also updates index)
+ */
+export async function deleteSpaceKeys(spaceId) {
+  await deleteSecret(`space:${spaceId}`);
+  
+  const index = await getSpaceIndex();
+  const newIndex = index.filter(id => id !== spaceId);
+  await saveSpaceIndex(newIndex);
+}
+
+/**
+ * List all spaces with basic info (loads each one)
+ */
+export async function listSpaces() {
+  const index = await getSpaceIndex();
+  const spaces = [];
+  
+  for (const spaceId of index) {
+    const keys = await getSpaceKeys(spaceId);
+    if (keys) {
+      spaces.push({
+        spaceId,
+        spaceName: keys.spaceName,
+        inboxAddress: keys.inboxAddress,
+        joinedAt: keys.joinedAt,
+      });
+    }
+  }
+  
+  return spaces;
+}
+
 /**
  * Migrate keys from plaintext files to keychain
  * Returns true if migration occurred, false if already migrated or no keys to migrate
@@ -114,6 +188,49 @@ export async function migrateToKeychain(store) {
     console.log('✅ Keys migrated to OS keychain');
     console.log('⚠️  You can now delete the plaintext files in ~/.quorum-client/keys/');
     console.log('   (Keeping them as backup until you verify keychain access works)');
+  }
+  
+  return migrated;
+}
+
+/**
+ * Migrate space keys from plaintext files to keychain
+ * @param {string} spacesDir - Path to the spaces directory
+ */
+export async function migrateSpacesToKeychain(spacesDir) {
+  const fs = await import('fs');
+  const path = await import('path');
+  
+  if (!fs.existsSync(spacesDir)) {
+    return false;
+  }
+  
+  const files = fs.readdirSync(spacesDir).filter(f => f.endsWith('.json'));
+  let migrated = false;
+  
+  for (const file of files) {
+    const spaceId = file.replace('.json', '');
+    
+    // Check if already in keychain
+    if (await getSpaceKeys(spaceId)) {
+      continue;
+    }
+    
+    // Read from file
+    const filePath = path.join(spacesDir, file);
+    try {
+      const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      console.log(`🔐 Migrating space ${spaceId.substring(0, 12)}... to keychain`);
+      await saveSpaceKeys(spaceId, data);
+      migrated = true;
+    } catch (e) {
+      console.warn(`⚠️  Failed to migrate ${file}:`, e.message);
+    }
+  }
+  
+  if (migrated) {
+    console.log('✅ Space keys migrated to OS keychain');
+    console.log(`⚠️  You can now delete the plaintext files in ${spacesDir}/`);
   }
   
   return migrated;
