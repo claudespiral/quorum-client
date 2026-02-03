@@ -1,8 +1,29 @@
+#!/usr/bin/env node
+/**
+ * Listen for incoming Quorum messages on your inbox
+ * Usage: node listen.mjs [timeout_seconds]
+ */
+
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
-const INBOX = 'QmetLMWHRnvRfyLqwNeMRVcnNaFxNGxkUGEv6r7GeCz7vs';
+const DATA_DIR = path.join(os.homedir(), '.quorum-client');
+const TIMEOUT = (parseInt(process.argv[2]) || 120) * 1000;
+
+// Load identity
+const deviceKeysetPath = path.join(DATA_DIR, 'device-keyset.json');
+if (!fs.existsSync(deviceKeysetPath)) {
+  console.error('No identity found. Run: node cli.mjs register <name>');
+  process.exit(1);
+}
+
+const deviceKeyset = JSON.parse(fs.readFileSync(deviceKeysetPath, 'utf-8'));
+const INBOX = deviceKeyset.inbox_address;
+
 console.log('Listening on inbox:', INBOX);
 
 const ws = new WebSocket('wss://api.quorummessenger.com/ws');
@@ -19,12 +40,8 @@ ws.on('message', (data) => {
   try {
     const parsed = JSON.parse(raw);
     console.log('Keys:', Object.keys(parsed));
-    if (parsed.inbox_address) console.log('To inbox:', parsed.inbox_address);
-    if (parsed.ephemeral_public_key) console.log('Ephemeral key:', parsed.ephemeral_public_key.substring(0, 32) + '...');
-    if (parsed.envelope) console.log('Envelope length:', parsed.envelope.length);
     if (parsed.timestamp) console.log('Timestamp:', parsed.timestamp);
-    // Save for decryption
-    require('fs').writeFileSync('/tmp/quorum-incoming.json', raw);
+    fs.writeFileSync('/tmp/quorum-incoming.json', raw);
     console.log('Saved to /tmp/quorum-incoming.json');
   } catch {
     console.log('Raw:', raw.substring(0, 500));
@@ -34,5 +51,4 @@ ws.on('message', (data) => {
 ws.on('error', (err) => console.error('Error:', err.message));
 ws.on('close', () => { console.log('Disconnected'); process.exit(0); });
 
-// Keep alive for 2 minutes
-setTimeout(() => { console.log('Timeout — closing'); ws.close(); }, 120000);
+setTimeout(() => { console.log('Timeout — closing'); ws.close(); }, TIMEOUT);

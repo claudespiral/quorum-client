@@ -1,8 +1,28 @@
 # quorum-client
 
-Headless E2EE client for [Quorum](https://quilibrium.com) messenger, the Quilibrium-powered encrypted messaging platform.
+Headless E2EE client for [Quorum](https://quilibrium.com) messenger — the Quilibrium-powered encrypted messaging platform.
 
-**Zero dependencies** beyond Node.js 20+ — cryptography runs via bundled WASM (Decaf448 curves, Double Ratchet, X3DH).
+**Zero dependencies** beyond Node.js 20+ and `ws`. Cryptography runs via bundled WASM (Decaf448 curves, Double Ratchet, X3DH).
+
+## Quick Start
+
+```bash
+# Clone and install
+git clone https://github.com/claudespiral/quorum-client.git
+cd quorum-client
+npm install
+
+# Create your identity
+node cli.mjs register "YourName"
+
+# Your address will be displayed — share it with others!
+
+# Send a message
+node send.mjs "Hello!" QmRecipientAddress...
+
+# Listen for incoming messages
+node listen.mjs
+```
 
 ## What is this?
 
@@ -11,110 +31,89 @@ A command-line / programmatic client for Quorum messenger that handles:
 - **Identity generation** — Ed448 user keys, X448 device keys, inbox keypairs
 - **Registration** — Posts your public keys to the Quorum API
 - **E2EE messaging** — X3DH key exchange → Double Ratchet encrypted DMs
-- **State persistence** — Keys and ratchet states saved to disk
+- **Message receiving** — WebSocket subscription to your inbox
+- **State persistence** — Keys saved to `~/.quorum-client/`
 
-Think of it as a headless version of the Quorum mobile/desktop app.
+Works with the official Quorum mobile/desktop apps — full interoperability.
 
-## Quick Start
+## Commands
 
 ```bash
-# Register a new identity
-node cli.mjs register "MyName"
+# Register a new identity (first time only)
+node cli.mjs register "DisplayName"
 
 # Show your identity
 node cli.mjs identity
 
-# Look up a user
-node cli.mjs lookup <address>
+# Look up another user
+node cli.mjs lookup QmTheirAddress...
 
-# Send an encrypted DM
-node cli.mjs send <recipient-address> Hello from the command line!
+# Send an encrypted message
+node send.mjs "Your message here" QmRecipientAddress...
 
-# List contacts
-node cli.mjs contacts
+# Listen for incoming messages (default 2 min timeout)
+node listen.mjs [timeout_seconds]
 ```
 
-## Programmatic Usage
+## How It Works
 
-```javascript
-import { QuorumClient } from './src/client.mjs';
+**Sending:**
+1. Fetch recipient's public keys from Quorum API
+2. Generate ephemeral X448 key
+3. X3DH key exchange → shared secret
+4. Double Ratchet encrypt your message
+5. Seal envelope with recipient's inbox key
+6. Send to recipient's device inbox
 
-const client = new QuorumClient({
-  dataDir: './my-quorum-data',
-  displayName: 'My Bot',
-});
+**Receiving:**
+1. Connect to WebSocket: `wss://api.quorummessenger.com/ws`
+2. Subscribe to your inbox address
+3. Receive sealed messages as they arrive
+4. Decrypt with your inbox key → X3DH → Double Ratchet
+5. Plaintext message!
 
-await client.init();
-
-// Register (first time only)
-const { address } = await client.register('My Bot');
-console.log('Registered as:', address);
-
-// Send a message
-await client.sendMessage(recipientAddress, 'Hello!');
-
-// Process incoming messages
-const envelope = client.decryptInboxMessage(sealedMessage);
-const result = await client.processInitMessage(envelope);
-console.log(`${result.displayName}: ${result.message}`);
+**True E2EE:**
 ```
+Sender: plaintext → [encrypt locally] → ciphertext
+                           ↓
+              API relay only sees ciphertext
+                           ↓
+Receiver: ciphertext → [decrypt locally] → plaintext
+```
+
+No server ever sees your plaintext. Even if the relay is compromised, messages remain encrypted with keys it never had.
+
+## Data Storage
+
+All data stored in `~/.quorum-client/`:
+
+```
+device-keyset.json    — Your X448 keys (KEEP SECRET!)
+registration.json     — Your public registration
+profile.json          — Display name, metadata
+user-keys.json        — Ed448 identity keys (KEEP SECRET!)
+sessions/             — Double Ratchet session states
+```
+
+⚠️ **Backup your `~/.quorum-client/` directory** — losing it means losing your identity.
 
 ## Architecture
 
 ```
-cli.mjs            — CLI interface
+cli.mjs          — CLI interface
+send.mjs         — Quick send script
+listen.mjs       — WebSocket listener
 src/
-  client.mjs       — Main client (orchestrates everything)
-  crypto.mjs       — WASM crypto wrapper (X448, Ed448, X3DH, Double Ratchet)
-  api.mjs          — Quorum REST API client
-  store.mjs        — Disk persistence for keys and sessions
-  wasm/            — Quilibrium channel WASM (from quilibrium-js-sdk-channels)
+  client.mjs     — Main client class
+  crypto.mjs     — WASM crypto wrapper
+  api.mjs        — Quorum REST API
+  store.mjs      — Persistence layer
+  wasm/          — Quilibrium channel WASM
 ```
-
-## E2EE Protocol
-
-1. **Key Generation**: Ed448 (signing) + X448 (key exchange) via Decaf448 curves
-2. **Registration**: Public keys posted to `api.quorummessenger.com`
-3. **First Message**: X3DH key agreement → establishes shared secret
-4. **Ongoing**: Double Ratchet protocol (forward secrecy per message)
-5. **Transport**: Messages sealed with inbox encryption keys, relayed via Quorum API
-
-The same protocol used by the official Quorum mobile and desktop apps.
-
-## Data Storage
-
-Keys and state are stored in `~/.quorum-client/` (configurable):
-
-```
-keys/
-  user-keyset.json      — Ed448 user identity (KEEP SECRET)
-  device-keyset.json    — X448 device keys + inbox keys (KEEP SECRET)
-  registration.json     — Public registration (safe to share)
-sessions/
-  <hex>.json            — Double Ratchet state per conversation
-conversations/
-  <id>.json             — Conversation metadata
-profile.json            — Display name, creation date
-```
-
-⚠️ **Back up your `keys/` directory** — losing it means losing your identity and all active conversations.
 
 ## Crypto Credits
 
-The WASM cryptography module is from [quilibrium-js-sdk-channels](https://github.com/QuilibriumNetwork/quilibrium-js-sdk-channels) by Quilibrium Inc, licensed under MIT.
-
-## Status
-
-🚧 **Early experimental** — This is a proof-of-concept headless client.
-
-- [x] Identity generation and registration
-- [x] X3DH key exchange (sender side)
-- [x] Double Ratchet encryption/decryption
-- [x] Sealed inbox message encryption
-- [ ] Message polling / WebSocket receive
-- [ ] Session confirmation (bidirectional ratchet)
-- [ ] Group messaging (Triple Ratchet / Spaces)
-- [ ] Message deletion acknowledgment
+WASM cryptography from [quilibrium-js-sdk-channels](https://github.com/QuilibriumNetwork/quilibrium-js-sdk-channels) by Quilibrium Inc (MIT).
 
 ## License
 

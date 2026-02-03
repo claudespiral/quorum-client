@@ -1,8 +1,15 @@
-// Quick send script with correct sender-side X3DH
+#!/usr/bin/env node
+/**
+ * Send an encrypted Quorum message
+ * Usage: node send.mjs <message> [recipient_address]
+ */
+
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const WebSocket = require('ws');
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { homedir } from 'os';
 
 import { 
   initCrypto, senderX3DH, newDoubleRatchet, 
@@ -10,16 +17,41 @@ import {
 } from './src/crypto.mjs';
 import { QuorumAPI } from './src/api.mjs';
 
-const message = process.argv[2] || 'Hello from Claude!';
-const recipientAddr = process.argv[3] || 'QmRgPaapcYgaKrQWVENTfn14hBfkbqAD4htwJpVH5VzKYz';
+const DATA_DIR = join(homedir(), '.quorum-client');
+
+// Check for identity
+if (!existsSync(join(DATA_DIR, 'device-keyset.json'))) {
+  console.error('No identity found. Run: node cli.mjs register <name>');
+  process.exit(1);
+}
+
+const message = process.argv[2];
+const recipientAddr = process.argv[3];
+
+if (!message || !recipientAddr) {
+  console.error('Usage: node send.mjs <message> <recipient_address>');
+  process.exit(1);
+}
 
 await initCrypto();
 
-const deviceKeyset = JSON.parse(readFileSync('/Users/claude/.quorum-client/device-keyset.json', 'utf-8'));
-const registration = JSON.parse(readFileSync('/Users/claude/.quorum-client/registration.json', 'utf-8'));
+const deviceKeyset = JSON.parse(readFileSync(join(DATA_DIR, 'device-keyset.json'), 'utf-8'));
+const registration = JSON.parse(readFileSync(join(DATA_DIR, 'registration.json'), 'utf-8'));
 
 const api = new QuorumAPI();
-const recipient = await api.getUser(recipientAddr);
+let recipient;
+try {
+  recipient = await api.getUser(recipientAddr);
+} catch (e) {
+  console.error('Failed to lookup recipient:', e.message);
+  process.exit(1);
+}
+
+if (!recipient?.device_registrations?.length) {
+  console.error('Recipient not found or has no registered devices');
+  process.exit(1);
+}
+
 const device = recipient.device_registrations[0];
 
 const ephemeralKey = generateX448();
@@ -57,7 +89,9 @@ const { envelope: msgEnvelope } = doubleRatchetEncrypt(
 
 const initEnvelope = {
   user_address: registration.user_address,
-  display_name: 'Claude',
+  display_name: readFileSync(join(DATA_DIR, 'profile.json'), 'utf-8') 
+    ? JSON.parse(readFileSync(join(DATA_DIR, 'profile.json'), 'utf-8')).displayName 
+    : 'Quorum User',
   return_inbox_address: deviceKeyset.inbox_address,
   return_inbox_encryption_key: Buffer.from(new Uint8Array(deviceKeyset.inbox_encryption_key.public_key)).toString('hex'),
   return_inbox_public_key: Buffer.from(new Uint8Array(deviceKeyset.inbox_signing_key.public_key)).toString('hex'),
@@ -89,7 +123,7 @@ ws.on('open', () => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(sealedMessage),
   }).then(r => r.text()).then(t => {
-    console.log('✅ Sent:', message);
+    console.log('✅ Sent to', recipientAddr.substring(0, 20) + '...');
     ws.close();
   });
 });
