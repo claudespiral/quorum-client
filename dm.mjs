@@ -88,8 +88,9 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   });
   
   // Build message
+  const messageId = randomUUID();
   const messagePayload = JSON.stringify({
-    messageId: randomUUID(),
+    messageId,
     content: { ...content, senderId: registration.user_address },
     createdDate: Date.now(),
     modifiedDate: Date.now(),
@@ -146,7 +147,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
     sender_name: recipient.display_name || recipientAddress.substring(0, 12),
   });
   
-  return { sent: true };
+  return { sent: true, messageId };
 }
 
 function getDisplayName() {
@@ -166,8 +167,9 @@ async function cmdSend(recipientAddress, text, replyToId, store, deviceKeyset, r
     content.repliesToMessageId = replyToId;
   }
   
-  await sendDM(recipientAddress, content, store, deviceKeyset, registration);
+  const result = await sendDM(recipientAddress, content, store, deviceKeyset, registration);
   console.log(`✅ Sent to ${recipientAddress.substring(0, 20)}...`);
+  console.log(`   id: ${result.messageId}`);
 }
 
 async function cmdReact(recipientAddress, messageId, emoji, store, deviceKeyset, registration) {
