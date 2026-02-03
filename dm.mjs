@@ -56,18 +56,38 @@ function bytesToHex(bytes) {
 async function sendDM(recipientAddress, content, store, deviceKeyset, registration) {
   const api = new QuorumAPI();
   
-  // Always fetch fresh device info from API (inbox addresses can change if device re-registers)
+  // Check for existing session
+  let session = store.getSession(recipientAddress);
+  
+  // Fetch fresh device info to check if inbox changed
   const recipient = await api.getUser(recipientAddress);
   if (!recipient?.device_registrations?.length) {
     throw new Error('Recipient not found or has no devices');
   }
-  
   const device = recipient.device_registrations[0];
+  const currentInboxAddress = device.inbox_registration.inbox_address;
+  
+  // If inbox address changed, we need to start fresh (device re-registered)
+  if (session && session.sending_inbox?.inbox_address !== currentInboxAddress) {
+    console.log('📱 Device re-registered, starting new session...');
+    session = null;
+  }
+  
+  if (!session) {
+    // First message - establish new session with X3DH
+    return await sendFirstMessage(recipientAddress, content, device, recipient, store, deviceKeyset, registration);
+  } else {
+    // Follow-up message - use existing ratchet state
+    return await sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration);
+  }
+}
+
+async function sendFirstMessage(recipientAddress, content, device, recipient, store, deviceKeyset, registration) {
   const ephemeralKey = generateX448();
   const receiverIdentityKey = [...Buffer.from(device.identity_public_key, 'hex')];
   const receiverPreKey = [...Buffer.from(device.pre_public_key, 'hex')];
   
-  // Always do fresh X3DH (simpler and more reliable than session management)
+  // X3DH key exchange
   const sessionKeyB64 = senderX3DH(
     deviceKeyset.identity_key.private_key,
     ephemeralKey.private_key,
@@ -98,7 +118,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   
   const { ratchet_state: newState, envelope: msgEnvelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
   
-  // Build init envelope (always include full handshake info)
+  // Build init envelope with full handshake info
   const initEnvelope = {
     user_address: registration.user_address,
     display_name: getDisplayName(),
@@ -136,7 +156,7 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
     body: JSON.stringify(sealedMessage),
   });
   
-  // Save session (for receiving replies)
+  // Save session for follow-up messages
   store.saveSession(recipientAddress, {
     ratchet_state: newState,
     sending_inbox: {
@@ -147,7 +167,70 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
     sender_name: recipient.display_name || recipientAddress.substring(0, 12),
   });
   
-  return { sent: true, messageId };
+  return { sent: true, messageId, firstMessage: true };
+}
+
+async function sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration) {
+  // Build message
+  const messageId = randomUUID();
+  const messagePayload = JSON.stringify({
+    messageId,
+    content: { ...content, senderId: registration.user_address },
+    createdDate: Date.now(),
+    modifiedDate: Date.now(),
+  });
+  
+  // Ratchet state is stored as a JSON string - pass it directly to WASM
+  // (The WASM expects a string, not a parsed object)
+  const ratchetState = session.ratchet_state;
+  
+  // Encrypt with existing ratchet (continues the conversation)
+  const { ratchet_state: newState, envelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
+  
+  const ephemeralKey = generateX448();
+  
+  // Build payload with return info (in case they need to reply)
+  const payload = JSON.stringify({
+    return_inbox_address: deviceKeyset.inbox_address,
+    return_inbox_encryption_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_encryption_key.public_key)),
+    return_inbox_public_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.public_key)),
+    return_inbox_private_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.private_key)),
+    user_address: registration.user_address,
+    identity_public_key: bytesToHex(new Uint8Array(deviceKeyset.identity_key.public_key)),
+    tag: deviceKeyset.inbox_address,
+    display_name: getDisplayName(),
+    message: envelope,
+    type: 'direct',
+  });
+  
+  const ciphertext = encryptInboxMessageBytes(
+    [...Buffer.from(session.sending_inbox.inbox_encryption_key, 'hex')],
+    ephemeralKey.private_key,
+    [...Buffer.from(payload, 'utf-8')]
+  );
+  
+  const sealedMessage = {
+    inbox_address: session.sending_inbox.inbox_address,
+    ephemeral_public_key: bytesToHex(new Uint8Array(ephemeralKey.public_key)),
+    envelope: ciphertext,
+    hub_address: '',
+    hub_public_key: '',
+    hub_signature: '',
+    timestamp: Date.now(),
+  };
+  
+  // Send via API
+  await fetch(`${API_BASE}/inbox`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sealedMessage),
+  });
+  
+  // Update session with new ratchet state
+  session.ratchet_state = newState;
+  store.saveSession(recipientAddress, session);
+  
+  return { sent: true, messageId, firstMessage: false };
 }
 
 function getDisplayName() {
