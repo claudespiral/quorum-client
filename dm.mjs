@@ -49,6 +49,9 @@ const BASE_DIR = process.env.QUORUM_BASE_DIR || join(homedir(), '.quorum-client'
 const WS_URL = 'wss://api.quorummessenger.com/ws';
 const API_BASE = 'https://api.quorummessenger.com';
 
+// Current identity directory (set in main)
+let IDENTITY_DIR = null;
+
 // ============ Identity Management ============
 
 function getIdentitiesDir() {
@@ -401,7 +404,7 @@ async function sendType2Message(recipientAddress, content, session, store, devic
 
 function getDisplayName() {
   try {
-    const profile = JSON.parse(readFileSync(join(DATA_DIR, 'profile.json'), 'utf-8'));
+    const profile = JSON.parse(readFileSync(join(IDENTITY_DIR, 'profile.json'), 'utf-8'));
     return profile.displayName || 'Quorum User';
   } catch {
     return 'Quorum User';
@@ -908,7 +911,7 @@ Examples:
   await initCrypto();
   
   // Resolve identity directory
-  const DATA_DIR = getIdentityDir(identity);
+  IDENTITY_DIR = getIdentityDir(identity);
   if (!identityExists(identity)) {
     if (identity === 'default') {
       // Auto-create default identity
@@ -920,7 +923,7 @@ Examples:
   }
   
   // Load identity
-  const store = await createSecureStore(DATA_DIR);
+  const store = await createSecureStore(IDENTITY_DIR);
   const deviceKeyset = await store.getDeviceKeyset();
   const registration = store.getRegistration();
   
