@@ -5,6 +5,7 @@
  * Commands:
  *   dm send <address> <text> [-r reply-to-id]  Send a DM
  *   dm embed <address> <image-path> [-r id]    Send an image
+ *   dm edit <address> <msg-id> <new-text>      Edit a message
  *   dm react <address> <msg-id> <emoji>        React to a message
  *   dm unreact <address> <msg-id> <emoji>      Remove a reaction
  *   dm delete <address> <msg-id>               Delete a message
@@ -416,6 +417,25 @@ async function cmdEmbed(recipientAddress, imagePath, replyToId, store, deviceKey
   console.log(`   id: ${result.messageId}`);
 }
 
+async function cmdEdit(recipientAddress, messageId, newText, store, deviceKeyset, registration) {
+  const content = {
+    type: 'edit-message',
+    originalMessageId: messageId,
+    editedText: newText,
+    editedAt: Date.now(),
+    editNonce: randomUUID(),
+  };
+  
+  // Edit should use Type 2 for existing sessions
+  const session = store.getSession(recipientAddress);
+  if (!session || !session.sending_inbox?.inbox_address) {
+    throw new Error('No existing session - cannot edit without prior conversation');
+  }
+  
+  await sendType2Message(recipientAddress, content, session, store, deviceKeyset, registration);
+  console.log(`✅ Edited message ${messageId.substring(0, 16)}...`);
+}
+
 async function cmdListen(duration, store, deviceKeyset, registration) {
   const inboxAddress = deviceKeyset.inbox_address;
   console.log(`Listening on inbox: ${inboxAddress}`);
@@ -518,6 +538,9 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
         console.log(`[${new Date().toLocaleTimeString()}] ${displayName} removed ${content.reaction} from ${content.messageId?.substring(0, 12)}...`);
       } else if (content.type === 'remove-message') {
         console.log(`[${new Date().toLocaleTimeString()}] ${displayName} deleted message ${content.removeMessageId?.substring(0, 12)}...`);
+      } else if (content.type === 'edit-message') {
+        console.log(`[${new Date().toLocaleTimeString()}] ${displayName} edited message ${content.originalMessageId?.substring(0, 12)}...`);
+        console.log(`   New text: ${content.editedText}`);
       } else if (content.type === 'embed') {
         const replyInfo = content.repliesToMessageId ? ` ↩️ ${content.repliesToMessageId.substring(0, 8)}` : '';
         console.log(`\n🖼️ [${new Date().toLocaleTimeString()}] ${displayName} sent an image${replyInfo}`);
@@ -654,6 +677,16 @@ Examples:
         throw new Error('Usage: dm delete <address> <msg-id>');
       }
       await cmdDelete(args[0], args[1], store, deviceKeyset, registration);
+      break;
+    }
+    case 'edit': {
+      if (!args[0] || !args[1] || !args[2]) {
+        throw new Error('Usage: dm edit <address> <msg-id> <new-text>');
+      }
+      const address = args[0];
+      const msgId = args[1];
+      const newText = args.slice(2).join(' ');
+      await cmdEdit(address, msgId, newText, store, deviceKeyset, registration);
       break;
     }
     case 'embed':
