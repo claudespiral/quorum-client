@@ -11,8 +11,14 @@
  */
 
 import keytar from 'keytar';
+import { homedir } from 'os';
+import { join, basename } from 'path';
 
-const SERVICE_NAME = 'quorum-client';
+// Service name derived from data directory for multi-profile support
+const dataDir = process.env.QUORUM_DATA_DIR || join(homedir(), '.quorum-client');
+// Remove leading dot from basename and ensure we have a valid name
+const dirName = basename(dataDir).replace(/^\./, '') || 'quorum-client';
+const SERVICE_NAME = dirName;
 
 // Keys we store in keychain (sensitive material)
 const KEYCHAIN_KEYS = {

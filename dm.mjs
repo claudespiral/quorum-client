@@ -4,6 +4,7 @@
  * 
  * Commands:
  *   dm send <address> <text> [-r reply-to-id]  Send a DM
+ *   dm embed <address> <image-path> [-r id]    Send an image
  *   dm react <address> <msg-id> <emoji>        React to a message
  *   dm unreact <address> <msg-id> <emoji>      Remove a reaction
  *   dm delete <address> <msg-id>               Delete a message
@@ -33,7 +34,7 @@ import {
 import { QuorumAPI } from './src/api.mjs';
 import { createSecureStore } from './src/secure-store.mjs';
 
-const DATA_DIR = join(homedir(), '.quorum-client');
+const DATA_DIR = process.env.QUORUM_DATA_DIR || join(homedir(), '.quorum-client');
 const WS_URL = 'wss://api.quorummessenger.com/ws';
 const API_BASE = 'https://api.quorummessenger.com';
 
@@ -59,27 +60,21 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   // Check for existing session
   let session = store.getSession(recipientAddress);
   
-  // Fetch fresh device info to check if inbox changed
+  if (session && session.sending_inbox?.inbox_address) {
+    // Use existing session - trust the return_inbox_address from received messages
+    // rather than API lookup (which may be stale or for a different device)
+    return await sendFollowUpMessage(recipientAddress, content, session, null, store, deviceKeyset, registration);
+  }
+  
+  // No session - fetch device info from API to establish new session
   const recipient = await api.getUser(recipientAddress);
   if (!recipient?.device_registrations?.length) {
     throw new Error('Recipient not found or has no devices');
   }
   const device = recipient.device_registrations[0];
-  const currentInboxAddress = device.inbox_registration.inbox_address;
   
-  // If inbox address changed, we need to start fresh (device re-registered)
-  if (session && session.sending_inbox?.inbox_address !== currentInboxAddress) {
-    console.log('📱 Device re-registered, starting new session...');
-    session = null;
-  }
-  
-  if (!session) {
-    // First message - establish new session with X3DH
-    return await sendFirstMessage(recipientAddress, content, device, recipient, store, deviceKeyset, registration);
-  } else {
-    // Follow-up message - use existing ratchet state
-    return await sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration);
-  }
+  // First message - establish new session with X3DH
+  return await sendFirstMessage(recipientAddress, content, device, recipient, store, deviceKeyset, registration);
 }
 
 async function sendFirstMessage(recipientAddress, content, device, recipient, store, deviceKeyset, registration) {
@@ -107,13 +102,21 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
     receiving_ephemeral_key: receiverPreKey,
   });
   
-  // Build message
+  // Build message with full structure (matching mobile app format)
   const messageId = randomUUID();
+  const now = Date.now();
   const messagePayload = JSON.stringify({
-    messageId,
-    content: { ...content, senderId: registration.user_address },
-    createdDate: Date.now(),
-    modifiedDate: Date.now(),
+    messageId: `${messageId}-${now}`,
+    channelId: recipientAddress,
+    spaceId: recipientAddress,
+    digestAlgorithm: "SHA-256",
+    nonce: messageId,
+    createdDate: now,
+    modifiedDate: now,
+    lastModifiedHash: "",
+    content: content.senderId ? content : { ...content, senderId: registration.user_address },
+    reactions: [],
+    mentions: { memberIds: [], roleIds: [], channelIds: [] },
   });
   
   const { ratchet_state: newState, envelope: msgEnvelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
@@ -171,13 +174,21 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
 }
 
 async function sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration) {
-  // Build message
+  // Build message with full structure (matching mobile app format)
   const messageId = randomUUID();
+  const now = Date.now();
   const messagePayload = JSON.stringify({
-    messageId,
-    content: { ...content, senderId: registration.user_address },
-    createdDate: Date.now(),
-    modifiedDate: Date.now(),
+    messageId: `${messageId}-${now}`,
+    channelId: recipientAddress,
+    spaceId: recipientAddress,
+    digestAlgorithm: "SHA-256",
+    nonce: messageId,
+    createdDate: now,
+    modifiedDate: now,
+    lastModifiedHash: "",
+    content: content.senderId ? content : { ...content, senderId: registration.user_address },
+    reactions: [],
+    mentions: { memberIds: [], roleIds: [], channelIds: [] },
   });
   
   // Ratchet state is stored as a JSON string - pass it directly to WASM
@@ -220,11 +231,73 @@ async function sendFollowUpMessage(recipientAddress, content, session, device, s
   };
   
   // Send via API
-  await fetch(`${API_BASE}/inbox`, {
+  console.log('📤 Sending to inbox:', session.sending_inbox.inbox_address);
+  console.log('📤 Message content type:', content.type);
+  const response = await fetch(`${API_BASE}/inbox`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(sealedMessage),
   });
+  console.log('📤 API response:', response.status, response.statusText);
+  
+  // Update session with new ratchet state
+  session.ratchet_state = newState;
+  store.saveSession(recipientAddress, session);
+  
+  return { sent: true, messageId, firstMessage: false };
+}
+
+// Send Type 2 message (continuation/reaction) - envelope is sent directly without Type 1 wrapper
+async function sendType2Message(recipientAddress, content, session, store, deviceKeyset, registration) {
+  const messageId = randomUUID();
+  const now = Date.now();
+  const messagePayload = JSON.stringify({
+    messageId: `${messageId}-${now}`,
+    channelId: recipientAddress,
+    spaceId: recipientAddress,
+    digestAlgorithm: "SHA-256",
+    nonce: messageId,
+    createdDate: now,
+    modifiedDate: now,
+    lastModifiedHash: "",
+    content: content.senderId ? content : { ...content, senderId: registration.user_address },
+    reactions: [],
+    mentions: { memberIds: [], roleIds: [], channelIds: [] },
+  });
+  
+  const ratchetState = session.ratchet_state;
+  
+  // Encrypt - this produces Type 2 envelope (protocol_identifier: 512, message_header, message_body)
+  const { ratchet_state: newState, envelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
+  
+  const ephemeralKey = generateX448();
+  
+  // For Type 2, send the envelope DIRECTLY without wrapping in Type 1 structure
+  // The envelope already has protocol_identifier: 512
+  const ciphertext = encryptInboxMessageBytes(
+    [...Buffer.from(session.sending_inbox.inbox_encryption_key, 'hex')],
+    ephemeralKey.private_key,
+    [...Buffer.from(envelope, 'utf-8')]  // envelope is already the Type 2 JSON
+  );
+  
+  const sealedMessage = {
+    inbox_address: session.sending_inbox.inbox_address,
+    ephemeral_public_key: bytesToHex(new Uint8Array(ephemeralKey.public_key)),
+    envelope: ciphertext,
+    hub_address: '',
+    hub_public_key: '',
+    hub_signature: '',
+    timestamp: Date.now(),
+  };
+  
+  console.log('📤 Sending Type 2 to inbox:', session.sending_inbox.inbox_address);
+  console.log('📤 Message content type:', content.type);
+  const response = await fetch(`${API_BASE}/inbox`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(sealedMessage),
+  });
+  console.log('📤 API response:', response.status, response.statusText);
   
   // Update session with new ratchet state
   session.ratchet_state = newState;
@@ -255,14 +328,23 @@ async function cmdSend(recipientAddress, text, replyToId, store, deviceKeyset, r
   console.log(`   id: ${result.messageId}`);
 }
 
-async function cmdReact(recipientAddress, messageId, emoji, store, deviceKeyset, registration) {
+async function cmdReact(recipientAddress, targetMessageId, emoji, store, deviceKeyset, registration) {
+  // Match exact field order from mobile app: type, senderId, messageId, reaction
   const content = {
     type: 'reaction',
+    senderId: registration.user_address,
+    messageId: targetMessageId,
     reaction: emoji,
-    messageId: messageId,
   };
   
-  await sendDM(recipientAddress, content, store, deviceKeyset, registration);
+  // Check for existing session - reactions MUST use Type 2 envelope
+  const session = store.getSession(recipientAddress);
+  if (!session || !session.sending_inbox?.inbox_address) {
+    throw new Error('No existing session - cannot send reaction without prior conversation');
+  }
+  
+  // Use Type 2 format (continuation message)
+  await sendType2Message(recipientAddress, content, session, store, deviceKeyset, registration);
   console.log(`✅ Reacted with ${emoji}`);
 }
 
@@ -273,7 +355,13 @@ async function cmdUnreact(recipientAddress, messageId, emoji, store, deviceKeyse
     messageId: messageId,
   };
   
-  await sendDM(recipientAddress, content, store, deviceKeyset, registration);
+  // Unreact must use existing session with Type 2
+  const session = store.getSession(recipientAddress);
+  if (!session || !session.sending_inbox?.inbox_address) {
+    throw new Error('No existing session - cannot unreact without prior conversation');
+  }
+  
+  await sendType2Message(recipientAddress, content, session, store, deviceKeyset, registration);
   console.log(`✅ Removed reaction ${emoji}`);
 }
 
@@ -283,8 +371,49 @@ async function cmdDelete(recipientAddress, messageId, store, deviceKeyset, regis
     removeMessageId: messageId,
   };
   
-  await sendDM(recipientAddress, content, store, deviceKeyset, registration);
+  // Delete must use existing session with Type 2
+  const session = store.getSession(recipientAddress);
+  if (!session || !session.sending_inbox?.inbox_address) {
+    throw new Error('No existing session - cannot delete without prior conversation');
+  }
+  
+  await sendType2Message(recipientAddress, content, session, store, deviceKeyset, registration);
   console.log(`✅ Deleted message ${messageId.substring(0, 16)}...`);
+}
+
+async function cmdEmbed(recipientAddress, imagePath, replyToId, store, deviceKeyset, registration) {
+  // Read the image file
+  const imageData = readFileSync(imagePath);
+  
+  // Detect mime type from extension
+  const ext = imagePath.toLowerCase().split('.').pop();
+  const mimeTypes = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+  };
+  const mimeType = mimeTypes[ext] || 'application/octet-stream';
+  
+  // Convert to base64 data URL
+  const base64 = imageData.toString('base64');
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  
+  console.log(`📎 Sending ${ext.toUpperCase()} image (${(imageData.length / 1024).toFixed(1)} KB)...`);
+  
+  const content = {
+    type: 'embed',
+    imageUrl: dataUrl,
+  };
+  
+  if (replyToId) {
+    content.repliesToMessageId = replyToId;
+  }
+  
+  const result = await sendDM(recipientAddress, content, store, deviceKeyset, registration);
+  console.log(`✅ Image sent to ${recipientAddress.substring(0, 20)}...`);
+  console.log(`   id: ${result.messageId}`);
 }
 
 async function cmdListen(duration, store, deviceKeyset, registration) {
@@ -389,6 +518,19 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
         console.log(`[${new Date().toLocaleTimeString()}] ${displayName} removed ${content.reaction} from ${content.messageId?.substring(0, 12)}...`);
       } else if (content.type === 'remove-message') {
         console.log(`[${new Date().toLocaleTimeString()}] ${displayName} deleted message ${content.removeMessageId?.substring(0, 12)}...`);
+      } else if (content.type === 'embed') {
+        const replyInfo = content.repliesToMessageId ? ` ↩️ ${content.repliesToMessageId.substring(0, 8)}` : '';
+        console.log(`\n🖼️ [${new Date().toLocaleTimeString()}] ${displayName} sent an image${replyInfo}`);
+        if (content.imageUrl?.startsWith('data:')) {
+          const sizeMatch = content.imageUrl.match(/base64,(.+)$/);
+          if (sizeMatch) {
+            const sizeKB = (sizeMatch[1].length * 0.75 / 1024).toFixed(1);
+            console.log(`   Size: ~${sizeKB} KB`);
+          }
+        } else if (content.imageUrl) {
+          console.log(`   URL: ${content.imageUrl.substring(0, 50)}...`);
+        }
+        console.log(`   id: ${msgData.messageId}`);
       } else {
         console.log(`[${new Date().toLocaleTimeString()}] ${displayName}: [${content.type}]`);
       }
@@ -512,6 +654,22 @@ Examples:
         throw new Error('Usage: dm delete <address> <msg-id>');
       }
       await cmdDelete(args[0], args[1], store, deviceKeyset, registration);
+      break;
+    }
+    case 'embed':
+    case 'image': {
+      if (!args[0] || !args[1]) {
+        throw new Error('Usage: dm embed <address> <image-path> [-r reply-to-id]');
+      }
+      const address = args[0];
+      const imagePath = args[1];
+      const rIndex = args.indexOf('-r');
+      const replyToId = rIndex > 0 ? args[rIndex + 1] : null;
+      
+      if (!existsSync(imagePath)) {
+        throw new Error(`File not found: ${imagePath}`);
+      }
+      await cmdEmbed(address, imagePath, replyToId, store, deviceKeyset, registration);
       break;
     }
     case 'listen':

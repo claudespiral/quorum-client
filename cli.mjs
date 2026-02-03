@@ -16,7 +16,7 @@ import { QuorumClient } from './src/client.mjs';
 import { join } from 'path';
 import { homedir } from 'os';
 
-const DATA_DIR = join(homedir(), '.quorum-client');
+const DATA_DIR = process.env.QUORUM_DATA_DIR || join(homedir(), '.quorum-client');
 const args = process.argv.slice(2);
 const command = args[0];
 
