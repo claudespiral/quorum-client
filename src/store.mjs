@@ -5,7 +5,7 @@
  * All sensitive data is stored as JSON files in a configurable directory.
  */
 
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, openSync, closeSync, fsyncSync, chmodSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, renameSync, openSync, closeSync, fsyncSync, chmodSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 /**
@@ -109,6 +109,17 @@ export class QuorumStore {
     return readdirSync(this.sessionsDir)
       .filter(f => f.endsWith('.json'))
       .map(f => Buffer.from(f.replace('.json', ''), 'hex').toString());
+  }
+
+  /** Delete a session by tag */
+  deleteSession(tag) {
+    const safeName = Buffer.from(tag).toString('hex');
+    const path = join(this.sessionsDir, `${safeName}.json`);
+    if (existsSync(path)) {
+      unlinkSync(path);
+      return true;
+    }
+    return false;
   }
 
   // ============ Conversations ============

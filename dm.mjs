@@ -141,6 +141,19 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   let session = store.getSession(recipientAddress);
   
   if (session && session.sending_inbox?.inbox_address) {
+    // Check ratchet health - warn if potentially out of sync
+    try {
+      const ratchet = JSON.parse(session.ratchet_state);
+      const totalSent = (ratchet.current_sending_chain_length || 0) + (ratchet.previous_sending_chain_length || 0);
+      const totalRecv = (ratchet.current_receiving_chain_length || 0) + (ratchet.previous_receiving_chain_length || 0);
+      
+      if (totalSent > 10 && totalRecv === 0) {
+        console.log(`⚠️  Warning: Sent ${totalSent} messages without receiving any.`);
+        console.log(`   Ratchet may be out of sync. Use 'dm status <address>' to check,`);
+        console.log(`   or 'dm reset <address>' to start fresh.`);
+      }
+    } catch {}
+    
     // Use existing session - trust the return_inbox_address from received messages
     // rather than API lookup (which may be stale or for a different device)
     return await sendFollowUpMessage(recipientAddress, content, session, null, store, deviceKeyset, registration);
@@ -674,6 +687,84 @@ async function cmdConversations(store) {
   }
 }
 
+async function cmdStatus(recipientAddress, store) {
+  const session = store.getSession(recipientAddress);
+  
+  if (!session) {
+    console.log(`No session found for ${recipientAddress}`);
+    console.log('Start a conversation first with: dm send <address> <text>');
+    return;
+  }
+  
+  const name = session.sender_name || recipientAddress.substring(0, 16);
+  console.log(`\n📊 Session status: ${name}`);
+  console.log(`   Address: ${recipientAddress}`);
+  console.log(`   Inbox: ${session.sending_inbox?.inbox_address || 'unknown'}`);
+  
+  // Parse ratchet state
+  let ratchet;
+  try {
+    ratchet = JSON.parse(session.ratchet_state);
+  } catch {
+    console.log('\n⚠️  Ratchet state: CORRUPTED or MISSING');
+    console.log('   Recommend: dm reset <address>');
+    return;
+  }
+  
+  const sent = ratchet.current_sending_chain_length || 0;
+  const prevSent = ratchet.previous_sending_chain_length || 0;
+  const recv = ratchet.current_receiving_chain_length || 0;
+  const prevRecv = ratchet.previous_receiving_chain_length || 0;
+  const skippedCount = Object.keys(ratchet.skipped_keys_map || {}).length;
+  
+  console.log(`\n🔄 Ratchet state:`);
+  console.log(`   Messages sent (this chain): ${sent}`);
+  console.log(`   Messages received (this chain): ${recv}`);
+  console.log(`   Previous chains: sent=${prevSent}, recv=${prevRecv}`);
+  console.log(`   Skipped keys cached: ${skippedCount}`);
+  
+  // Health check
+  const totalSent = sent + prevSent;
+  const totalRecv = recv + prevRecv;
+  
+  console.log(`\n💚 Health:`);
+  
+  if (totalSent > 10 && totalRecv === 0) {
+    console.log(`   ⚠️  WARNING: Sent ${totalSent} messages, received 0`);
+    console.log(`      Ratchet may be out of sync with recipient!`);
+    console.log(`      If they can't read your messages, try: dm reset ${recipientAddress}`);
+  } else if (totalSent > totalRecv * 5 && totalSent > 5) {
+    console.log(`   ⚠️  CAUTION: Sent ${totalSent}, received ${totalRecv}`);
+    console.log(`      Large imbalance - consider verifying recipient can decrypt`);
+  } else {
+    console.log(`   ✅ Looks healthy (sent=${totalSent}, recv=${totalRecv})`);
+  }
+  
+  if (skippedCount > 50) {
+    console.log(`   ⚠️  Many skipped keys (${skippedCount}) - some messages may have been lost`);
+  }
+  
+  console.log();
+}
+
+async function cmdReset(recipientAddress, store) {
+  const session = store.getSession(recipientAddress);
+  
+  if (!session) {
+    console.log(`No session found for ${recipientAddress}`);
+    return;
+  }
+  
+  const name = session.sender_name || recipientAddress.substring(0, 16);
+  
+  // Delete the session
+  store.deleteSession(recipientAddress);
+  
+  console.log(`🗑️  Deleted session with ${name}`);
+  console.log(`   Next message will start a fresh X3DH handshake`);
+  console.log(`   Recipient should be able to decrypt the new conversation`);
+}
+
 // ============ Main ============
 
 function parseArgs(argv) {
@@ -718,6 +809,8 @@ Message commands:
   delete <address> <msg-id>                Delete a message
   listen [timeout_seconds]                 Listen for incoming DMs
   conversations                            List conversations
+  status <address>                         Show ratchet health for a conversation
+  reset <address>                          Reset session (fixes out-of-sync ratchet)
 
 Examples:
   node dm.mjs identity create alice
@@ -912,6 +1005,16 @@ Examples:
     case 'conversations':
       await cmdConversations(store);
       break;
+    case 'status': {
+      if (!args[0]) throw new Error('Usage: dm status <address>');
+      await cmdStatus(args[0], store);
+      break;
+    }
+    case 'reset': {
+      if (!args[0]) throw new Error('Usage: dm reset <address>');
+      await cmdReset(args[0], store);
+      break;
+    }
     default:
       console.error('Unknown command:', cmd);
       process.exit(1);

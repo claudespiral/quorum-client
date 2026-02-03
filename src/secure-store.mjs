@@ -98,6 +98,10 @@ export class SecureStore {
     return this.fileStore.listSessions();
   }
 
+  deleteSession(tag) {
+    return this.fileStore.deleteSession(tag);
+  }
+
   saveConversation(conversationId, metadata) {
     return this.fileStore.saveConversation(conversationId, metadata);
   }
