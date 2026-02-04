@@ -14,7 +14,10 @@
     "test:spaces": "node test/spaces.mjs",
     "test:spaces:verbose": "node test/spaces.mjs --verbose",
     "test:spaces:keep": "node test/spaces.mjs --keep",
-    "test:all": "node test/integration.mjs && node test/spaces.mjs"
+    "test:unit": "node --test test/unit/*.test.mjs",
+    "test:unit:watch": "node --test --watch test/unit/*.test.mjs",
+    "test:integration": "node test/integration.mjs && node test/spaces.mjs",
+    "test:all": "npm run test:unit && npm run test:integration"
   },
   "keywords": [
     "quilibrium",
