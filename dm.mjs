@@ -566,9 +566,13 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
       
       const outer = JSON.parse(new TextDecoder().decode(new Uint8Array(decrypted)));
       
+      // Check if this is a raw DR envelope (no InitializationEnvelope wrapper)
+      // Raw DR envelopes have protocol_identifier, message_header, message_body
+      const isRawDREnvelope = outer.protocol_identifier !== undefined && outer.message_header;
+      
       // Get or create session for this sender
-      const senderAddress = outer.user_address || outer.return_inbox_address;
-      let session = store.getSession(senderAddress);
+      let senderAddress = outer.user_address || outer.return_inbox_address;
+      let session = senderAddress ? store.getSession(senderAddress) : null;
       const isInitEnvelope = outer.identity_public_key && outer.return_inbox_address;
       
       // Helper to create fresh session from init envelope
@@ -623,16 +627,39 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
       
       let decryptResult = null;
       
-      // Strategy: try existing session first, fall back to fresh if it fails
-      if (session) {
-        decryptResult = tryDecrypt(session.ratchet_state, outer.message);
-      }
-      
-      // If existing session failed and this is an init envelope, try fresh session
-      // (handles case where sender reset their session)
-      if (!decryptResult && isInitEnvelope) {
-        session = createFreshSession();
-        decryptResult = tryDecrypt(session.ratchet_state, outer.message);
+      // Handle raw DR envelopes (no InitializationEnvelope wrapper)
+      // These don't have user_address, so we try all known sessions
+      if (isRawDREnvelope) {
+        const allSessions = store.listSessions();
+        for (const tag of allSessions) {
+          const candidateSession = store.getSession(tag);
+          if (!candidateSession) continue;
+          
+          decryptResult = tryDecrypt(candidateSession.ratchet_state, outer);
+          if (decryptResult) {
+            session = candidateSession;
+            senderAddress = candidateSession.recipient_address || tag;
+            break;
+          }
+        }
+        
+        if (!decryptResult) {
+          if (process.env.DEBUG) console.log(`[${new Date().toLocaleTimeString()}] Raw DR envelope - no matching session`);
+          return;
+        }
+      } else {
+        // Standard InitializationEnvelope handling
+        // Strategy: try existing session first, fall back to fresh if it fails
+        if (session) {
+          decryptResult = tryDecrypt(session.ratchet_state, outer.message);
+        }
+        
+        // If existing session failed and this is an init envelope, try fresh session
+        // (handles case where sender reset their session)
+        if (!decryptResult && isInitEnvelope) {
+          session = createFreshSession();
+          decryptResult = tryDecrypt(session.ratchet_state, outer.message);
+        }
       }
       
       if (!decryptResult || !session) {
@@ -644,7 +671,7 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
       
       // Update session
       session.ratchet_state = newState;
-      if (outer.return_inbox_address) {
+      if (!isRawDREnvelope && outer.return_inbox_address) {
         session.sending_inbox = {
           inbox_address: outer.return_inbox_address,
           inbox_encryption_key: outer.return_inbox_encryption_key,
