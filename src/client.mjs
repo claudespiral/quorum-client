@@ -182,13 +182,70 @@ export class QuorumClient {
 
   // ============ Messaging ============
 
-  async sendMessage(recipientAddress, text) {
+  /**
+   * Verify that a peer's inbox hasn't changed since we established a session.
+   * Returns { valid: true } if inbox matches, or { valid: false, cached, current } if mismatched.
+   * 
+   * Call this before sending to detect stale sessions that would silently fail.
+   */
+  async verifyPeerInbox(peerAddress) {
+    const session = this.store.getSession(peerAddress);
+    if (!session?.sending_inbox?.inbox_address) {
+      return { valid: true, reason: 'no_session' }; // No session = will do fresh X3DH
+    }
+
+    const cachedInbox = session.sending_inbox.inbox_address;
+
+    try {
+      const peer = await this.api.getUser(peerAddress);
+      if (!peer?.device_registrations?.length) {
+        return { valid: false, reason: 'peer_not_found', cached: cachedInbox };
+      }
+
+      const currentInbox = peer.device_registrations[0].inbox_registration?.inbox_address;
+      
+      if (cachedInbox === currentInbox) {
+        return { valid: true };
+      } else {
+        return { 
+          valid: false, 
+          reason: 'inbox_changed',
+          cached: cachedInbox,
+          current: currentInbox,
+        };
+      }
+    } catch (e) {
+      // API error - proceed anyway, message might still work
+      return { valid: true, reason: 'api_error', error: e.message };
+    }
+  }
+
+  async sendMessage(recipientAddress, text, options = {}) {
     if (!this.hasIdentity) throw new Error('Not registered');
 
     let session = this.store.getSession(recipientAddress);
     if (!session) {
       return this._sendFirstMessage(recipientAddress, text);
     }
+
+    // Check for stale inbox (unless caller opts out)
+    if (options.skipInboxCheck !== true) {
+      const inboxCheck = await this.verifyPeerInbox(recipientAddress);
+      if (!inboxCheck.valid && inboxCheck.reason === 'inbox_changed') {
+        if (options.autoReset) {
+          // Auto-reset and send fresh
+          this.resetSession(recipientAddress);
+          return this._sendFirstMessage(recipientAddress, text);
+        } else {
+          const err = new Error(`Peer inbox changed: cached=${inboxCheck.cached?.substring(0,16)}... current=${inboxCheck.current?.substring(0,16)}...`);
+          err.code = 'INBOX_CHANGED';
+          err.cached = inboxCheck.cached;
+          err.current = inboxCheck.current;
+          throw err;
+        }
+      }
+    }
+
     return this._sendFollowUpMessage(recipientAddress, text, session);
   }
 

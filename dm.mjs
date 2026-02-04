@@ -147,22 +147,44 @@ async function sendDM(recipientAddress, content, store, deviceKeyset, registrati
   let session = store.getSession(recipientAddress);
   
   if (session && session.sending_inbox?.inbox_address) {
-    // Check ratchet health - warn if potentially out of sync
+    // Check if recipient's inbox has changed (device re-registration)
     try {
-      const ratchet = JSON.parse(session.ratchet_state);
-      const totalSent = (ratchet.current_sending_chain_length || 0) + (ratchet.previous_sending_chain_length || 0);
-      const totalRecv = (ratchet.current_receiving_chain_length || 0) + (ratchet.previous_receiving_chain_length || 0);
-      
-      if (totalSent > 10 && totalRecv === 0) {
-        console.log(`⚠️  Warning: Sent ${totalSent} messages without receiving any.`);
-        console.log(`   Ratchet may be out of sync. Use 'dm status <address>' to check,`);
-        console.log(`   or 'dm reset <address>' to start fresh.`);
+      const recipient = await api.getUser(recipientAddress);
+      if (recipient?.device_registrations?.length) {
+        const currentInbox = recipient.device_registrations[0].inbox_registration?.inbox_address;
+        const cachedInbox = session.sending_inbox.inbox_address;
+        
+        if (currentInbox && cachedInbox !== currentInbox) {
+          console.log(`⚠️  Recipient's inbox changed - resetting session for fresh X3DH`);
+          console.log(`   Cached: ${cachedInbox.substring(0, 20)}...`);
+          console.log(`   Current: ${currentInbox.substring(0, 20)}...`);
+          store.deleteSession(recipientAddress);
+          session = null;
+          // Fall through to first message path below
+        }
       }
-    } catch {}
+    } catch (e) {
+      // API error - proceed with cached session
+      console.log(`⚠️  Could not verify recipient inbox: ${e.message}`);
+    }
     
-    // Use existing session - trust the return_inbox_address from received messages
-    // rather than API lookup (which may be stale or for a different device)
-    return await sendFollowUpMessage(recipientAddress, content, session, null, store, deviceKeyset, registration);
+    if (session) {
+      // Check ratchet health - warn if potentially out of sync
+      try {
+        const ratchet = JSON.parse(session.ratchet_state);
+        const totalSent = (ratchet.current_sending_chain_length || 0) + (ratchet.previous_sending_chain_length || 0);
+        const totalRecv = (ratchet.current_receiving_chain_length || 0) + (ratchet.previous_receiving_chain_length || 0);
+        
+        if (totalSent > 10 && totalRecv === 0) {
+          console.log(`⚠️  Warning: Sent ${totalSent} messages without receiving any.`);
+          console.log(`   Ratchet may be out of sync. Use 'dm status <address>' to check,`);
+          console.log(`   or 'dm reset <address>' to start fresh.`);
+        }
+      } catch {}
+      
+      // Use existing session
+      return await sendFollowUpMessage(recipientAddress, content, session, null, store, deviceKeyset, registration);
+    }
   }
   
   // No session - fetch device info from API to establish new session
