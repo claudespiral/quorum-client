@@ -107,6 +107,79 @@ export class QuorumClient {
     return { address: userAddress, inboxAddress: this.deviceKeyset.inbox_address };
   }
 
+  /**
+   * Verify that local device keyset matches API registration.
+   * Returns { synced: true } if they match, or { synced: false, local, remote } if mismatched.
+   * 
+   * Call this on startup to detect stale registrations that would cause DMs to fail silently.
+   */
+  async verifyRegistration() {
+    if (!this.initialized) throw new Error('Call init() first');
+    if (!this.hasIdentity) return { synced: false, reason: 'not_registered' };
+
+    const localInbox = this.deviceKeyset?.inbox_address;
+    if (!localInbox) return { synced: false, reason: 'no_local_keyset' };
+
+    try {
+      const apiUser = await this.api.getUser(this.registration.user_address);
+      if (!apiUser?.device_registrations?.length) {
+        return { synced: false, reason: 'no_api_registration' };
+      }
+
+      const apiInbox = apiUser.device_registrations[0].inbox_registration?.inbox_address;
+      
+      if (localInbox === apiInbox) {
+        return { synced: true };
+      } else {
+        return { 
+          synced: false, 
+          reason: 'mismatch',
+          local: localInbox,
+          remote: apiInbox,
+        };
+      }
+    } catch (e) {
+      return { synced: false, reason: 'api_error', error: e.message };
+    }
+  }
+
+  /**
+   * Re-register device keyset with the API.
+   * Use this to fix a mismatch detected by verifyRegistration().
+   */
+  async syncRegistration() {
+    if (!this.initialized) throw new Error('Call init() first');
+    if (!this.hasIdentity) throw new Error('Not registered');
+    if (!this.deviceKeyset) throw new Error('No device keyset');
+
+    // Get user keys (need private key to sign)
+    const userKeyset = await this.store.getUserKeyset();
+    if (!userKeyset) {
+      throw new Error('No user keyset found - cannot sign registration');
+    }
+
+    // Build new registration with current device keyset
+    const userPrivHex = Buffer.from(new Uint8Array(userKeyset.private_key)).toString('hex');
+    const newReg = constructRegistration(
+      this.registration.user_address,
+      this.registration.user_public_key,
+      userPrivHex,
+      this.deviceKeyset
+    );
+
+    // Post to API
+    await this.api.registerUser(newReg);
+
+    // Update local registration
+    this.registration = newReg;
+    this.store.saveRegistration(newReg);
+
+    return { 
+      success: true, 
+      inboxAddress: this.deviceKeyset.inbox_address 
+    };
+  }
+
   // ============ Messaging ============
 
   async sendMessage(recipientAddress, text) {

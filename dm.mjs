@@ -21,6 +21,9 @@
  *   dm delete <address> <msg-id>               Delete a message
  *   dm listen [timeout]                        Listen for DMs
  *   dm conversations                           List conversations
+ *   dm status <address>                        Show ratchet health for a conversation
+ *   dm reset <address>                         Reset session (fixes out-of-sync ratchet)
+ *   dm sync                                    Sync local keyset with API registration
  */
 
 import { createRequire } from 'module';
@@ -846,6 +849,7 @@ Message commands:
   conversations                            List conversations
   status <address>                         Show ratchet health for a conversation
   reset <address>                          Reset session (fixes out-of-sync ratchet)
+  sync                                     Sync local keyset with API registration
 
 Examples:
   node dm.mjs identity create alice
@@ -967,6 +971,27 @@ Examples:
   
   console.log(`🔐 Using identity: ${identity}`);
   
+  // Verify registration is in sync with API (skip for listen command to avoid delay)
+  if (cmd !== 'listen' && cmd !== 'conversations' && cmd !== 'status') {
+    const localInbox = deviceKeyset.inbox_address;
+    try {
+      const api = new QuorumAPI();
+      const apiUser = await api.getUser(registration.user_address);
+      const apiInbox = apiUser?.device_registrations?.[0]?.inbox_registration?.inbox_address;
+      
+      if (apiInbox && localInbox !== apiInbox) {
+        console.log(`\n⚠️  Registration mismatch detected!`);
+        console.log(`   Local inbox:  ${localInbox.substring(0, 20)}...`);
+        console.log(`   API inbox:    ${apiInbox.substring(0, 20)}...`);
+        console.log(`\n   This can cause DMs to fail silently.`);
+        console.log(`   Run 'dm sync' to fix this.\n`);
+      }
+    } catch (e) {
+      // Don't block on API errors, just warn
+      if (process.env.DEBUG) console.warn('Could not verify registration:', e.message);
+    }
+  }
+  
   switch (cmd) {
     case 'send': {
       if (!args[0] || !args[1]) {
@@ -1048,6 +1073,51 @@ Examples:
     case 'reset': {
       if (!args[0]) throw new Error('Usage: dm reset <address>');
       await cmdReset(args[0], store);
+      break;
+    }
+    case 'sync': {
+      // Re-register device keyset with API to fix mismatch
+      const api = new QuorumAPI();
+      
+      console.log('Checking registration sync...');
+      const apiUser = await api.getUser(registration.user_address);
+      const apiInbox = apiUser?.device_registrations?.[0]?.inbox_registration?.inbox_address;
+      const localInbox = deviceKeyset.inbox_address;
+      
+      if (apiInbox === localInbox) {
+        console.log('✅ Registration already in sync!');
+        console.log(`   Inbox: ${localInbox}`);
+        break;
+      }
+      
+      console.log(`Local inbox:  ${localInbox}`);
+      console.log(`API inbox:    ${apiInbox || 'none'}`);
+      console.log('\nRe-registering with API...');
+      
+      // Get user keyset for signing
+      const userKeyset = await store.getUserKeyset();
+      if (!userKeyset) {
+        throw new Error('No user keyset found - cannot sign registration');
+      }
+      
+      // Build new registration
+      const { constructRegistration } = await import('./src/crypto.mjs');
+      const userPrivHex = bytesToHex(new Uint8Array(userKeyset.private_key));
+      const newReg = constructRegistration(
+        registration.user_address,
+        registration.user_public_key,
+        userPrivHex,
+        deviceKeyset
+      );
+      
+      // Post to API
+      await api.registerUser(newReg);
+      
+      // Update local registration
+      store.saveRegistration(newReg);
+      
+      console.log('✅ Registration synced!');
+      console.log(`   Inbox: ${localInbox}`);
       break;
     }
     default:
