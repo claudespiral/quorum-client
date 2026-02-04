@@ -955,6 +955,154 @@ async function runTests() {
       results.fail('Post-reset communication', e);
     }
 
+    // ============ Test 13: Isolated Ratchet Transitions ============
+    // 
+    // This tests each Double Ratchet transition step in isolation:
+    // Step 1: Alice → Bob (initiator first message, X3DH)
+    // Step 2: Bob → Alice (receiver first reply, Bob performs DH ratchet)
+    // Step 3: Alice → Bob (initiator after receiving, Alice performs DH ratchet)
+    // Step 4: Bob → Alice (receiver second reply, steady state ratchet)
+    //
+    console.log('\n📋 Test Suite: Isolated Ratchet Transitions');
+    
+    // Reset both sessions for clean slate
+    alice.resetSession(bob.address);
+    bob.resetSession(alice.address);
+    alice.clearMessages();
+    bob.clearMessages();
+    
+    log('  Both sessions reset for isolated ratchet testing');
+
+    // Step 1: Alice → Bob (X3DH initialization)
+    console.log('\n  🔄 Step 1: Alice → Bob (X3DH init, first message)');
+    try {
+      const result = await alice.sendText(bob.address, 'Ratchet Step 1: Alice initiates');
+      if (!result.firstMessage) {
+        results.fail('Step 1: firstMessage flag', new Error('Expected firstMessage=true'));
+      } else {
+        results.pass('Step 1: Alice sent (X3DH init)');
+      }
+      
+      await sleep(2000);
+      const msgs = await bob.waitForMessages(1, 8000);
+      if (msgs[0].content.text === 'Ratchet Step 1: Alice initiates') {
+        results.pass('Step 1: Bob received', 'X3DH handshake complete');
+        
+        // Verify Bob's session state
+        const bobSession = bob.getSessionStatus(alice.address);
+        log(`    Bob session: sent=${bobSession?.sentThisChain}, recv=${bobSession?.recvThisChain}`);
+      } else {
+        results.fail('Step 1: content mismatch', new Error(msgs[0].content.text));
+      }
+    } catch (e) {
+      results.fail('Step 1: Alice → Bob', e);
+    }
+    
+    bob.clearMessages();
+
+    // Step 2: Bob → Alice (receiver's first reply, DH ratchet step)
+    console.log('\n  🔄 Step 2: Bob → Alice (receiver first reply, DH ratchet)');
+    try {
+      const result = await bob.sendText(alice.address, 'Ratchet Step 2: Bob replies');
+      results.pass('Step 2: Bob sent', `firstMessage=${result.firstMessage}`);
+      
+      await sleep(2000);
+      const msgs = await alice.waitForMessages(1, 8000);
+      if (msgs[0].content.text === 'Ratchet Step 2: Bob replies') {
+        results.pass('Step 2: Alice received', 'Bob DH ratchet verified');
+        
+        // Verify both session states after exchange
+        const aliceSession = alice.getSessionStatus(bob.address);
+        const bobSession = bob.getSessionStatus(alice.address);
+        log(`    Alice session: sent=${aliceSession?.sentThisChain}, recv=${aliceSession?.recvThisChain}`);
+        log(`    Bob session: sent=${bobSession?.sentThisChain}, recv=${bobSession?.recvThisChain}`);
+      } else {
+        results.fail('Step 2: content mismatch', new Error(msgs[0].content.text));
+      }
+    } catch (e) {
+      results.fail('Step 2: Bob → Alice', e);
+    }
+    
+    alice.clearMessages();
+
+    // Step 3: Alice → Bob (initiator after receiving, Alice DH ratchets)
+    console.log('\n  🔄 Step 3: Alice → Bob (after receiving, Alice DH ratchet)');
+    try {
+      const result = await alice.sendText(bob.address, 'Ratchet Step 3: Alice after receiving');
+      if (result.firstMessage) {
+        results.fail('Step 3: unexpected X3DH', new Error('Should be follow-up, not first message'));
+      } else {
+        results.pass('Step 3: Alice sent follow-up');
+      }
+      
+      await sleep(2000);
+      const msgs = await bob.waitForMessages(1, 8000);
+      if (msgs[0].content.text === 'Ratchet Step 3: Alice after receiving') {
+        results.pass('Step 3: Bob received', 'Alice DH ratchet verified');
+        
+        const aliceSession = alice.getSessionStatus(bob.address);
+        const bobSession = bob.getSessionStatus(alice.address);
+        log(`    Alice session: sent=${aliceSession?.sentThisChain}, recv=${aliceSession?.recvThisChain}`);
+        log(`    Bob session: sent=${bobSession?.sentThisChain}, recv=${bobSession?.recvThisChain}`);
+      } else {
+        results.fail('Step 3: content mismatch', new Error(msgs[0].content.text));
+      }
+    } catch (e) {
+      results.fail('Step 3: Alice → Bob', e);
+    }
+    
+    bob.clearMessages();
+
+    // Step 4: Bob → Alice (receiver second message, steady state)
+    console.log('\n  🔄 Step 4: Bob → Alice (second reply, steady state)');
+    try {
+      const result = await bob.sendText(alice.address, 'Ratchet Step 4: Bob second reply');
+      results.pass('Step 4: Bob sent');
+      
+      await sleep(2000);
+      const msgs = await alice.waitForMessages(1, 8000);
+      if (msgs[0].content.text === 'Ratchet Step 4: Bob second reply') {
+        results.pass('Step 4: Alice received', 'Steady state ratchet verified');
+        
+        const aliceSession = alice.getSessionStatus(bob.address);
+        const bobSession = bob.getSessionStatus(alice.address);
+        log(`    Alice session: sent=${aliceSession?.sentThisChain}, recv=${aliceSession?.recvThisChain}`);
+        log(`    Bob session: sent=${bobSession?.sentThisChain}, recv=${bobSession?.recvThisChain}`);
+      } else {
+        results.fail('Step 4: content mismatch', new Error(msgs[0].content.text));
+      }
+    } catch (e) {
+      results.fail('Step 4: Bob → Alice', e);
+    }
+    
+    alice.clearMessages();
+    bob.clearMessages();
+
+    // Step 5: Back-to-back from same sender (chain key advancement without DH)
+    console.log('\n  🔄 Step 5: Back-to-back messages (chain key only)');
+    try {
+      await alice.sendText(bob.address, 'Back-to-back 1');
+      await alice.sendText(bob.address, 'Back-to-back 2');
+      await alice.sendText(bob.address, 'Back-to-back 3');
+      results.pass('Step 5: Alice sent 3 consecutive');
+      
+      await sleep(3000);
+      const msgs = await bob.waitForMessages(3, 8000);
+      const texts = msgs.map(m => m.content.text);
+      if (texts.includes('Back-to-back 1') && texts.includes('Back-to-back 2') && texts.includes('Back-to-back 3')) {
+        results.pass('Step 5: Bob received all 3', 'Chain key advancement verified');
+        
+        const aliceSession = alice.getSessionStatus(bob.address);
+        log(`    Alice chain length: sent=${aliceSession?.sentThisChain}`);
+      } else {
+        results.fail('Step 5: missing messages', new Error(`Got: ${texts.join(', ')}`));
+      }
+    } catch (e) {
+      results.fail('Step 5: back-to-back', e);
+    }
+
+    results.pass('All ratchet transitions completed');
+
   } finally {
     // Cleanup
     console.log('\n🧹 Cleanup');

@@ -429,4 +429,31 @@ export class QuorumClient {
       };
     });
   }
+
+  /**
+   * Reset the Double Ratchet session with a peer.
+   * Next message will trigger a fresh X3DH handshake.
+   * 
+   * Use this when:
+   * - Session state is corrupted
+   * - Testing ratchet initialization
+   * - Peer has reset their session
+   * 
+   * @param {string} peerAddress - The peer's Quorum address
+   * @returns {boolean} True if session existed and was deleted
+   */
+  resetSession(peerAddress) {
+    if (!this.initialized) throw new Error('Call init() first');
+    return this.store.deleteSession(peerAddress);
+  }
+
+  /**
+   * Check if a session exists with a peer.
+   * @param {string} peerAddress - The peer's Quorum address
+   * @returns {boolean} True if session exists
+   */
+  hasSession(peerAddress) {
+    if (!this.initialized) throw new Error('Call init() first');
+    return !!this.store.getSession(peerAddress);
+  }
 }
