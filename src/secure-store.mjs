@@ -114,6 +114,28 @@ export class SecureStore {
     return this.fileStore.listConversations();
   }
 
+  // ============ Conversation Inbox Keypairs ============
+
+  saveConversationInboxKeypair(keypair) {
+    return this.fileStore.saveConversationInboxKeypair(keypair);
+  }
+
+  getConversationInboxKeypair(conversationId) {
+    return this.fileStore.getConversationInboxKeypair(conversationId);
+  }
+
+  getConversationInboxKeypairByAddress(inboxAddress) {
+    return this.fileStore.getConversationInboxKeypairByAddress(inboxAddress);
+  }
+
+  listConversationInboxes() {
+    return this.fileStore.listConversationInboxes();
+  }
+
+  deleteConversationInboxKeypair(conversationId) {
+    return this.fileStore.deleteConversationInboxKeypair(conversationId);
+  }
+
   save(filename, data) {
     return this.fileStore.save(filename, data);
   }

@@ -41,7 +41,9 @@ import {
   newDoubleRatchet, 
   doubleRatchetEncrypt,
   doubleRatchetDecrypt,
-  generateX448, 
+  generateX448,
+  generateEd448,
+  deriveAddress,
   encryptInboxMessageBytes,
   decryptInboxMessage,
 } from './src/crypto.mjs';
@@ -203,6 +205,25 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
   const receiverIdentityKey = [...Buffer.from(device.identity_public_key, 'hex')];
   const receiverPreKey = [...Buffer.from(device.pre_public_key, 'hex')];
   
+  // Generate conversation-specific inbox keypairs (like mobile does)
+  // X448 for encryption, Ed448 for signing, derive address from Ed448 public key
+  const conversationId = `${recipientAddress}/${recipientAddress}`;
+  const convEncryptionKey = generateX448();
+  const convSigningKey = generateEd448();
+  const convInboxAddress = deriveAddress(convSigningKey.public_key);
+  
+  // Save conversation inbox keypair for receiving replies
+  store.saveConversationInboxKeypair({
+    conversationId,
+    inboxAddress: convInboxAddress,
+    encryptionPublicKey: convEncryptionKey.public_key,
+    encryptionPrivateKey: convEncryptionKey.private_key,
+    signingPublicKey: convSigningKey.public_key,
+    signingPrivateKey: convSigningKey.private_key,
+  });
+  
+  console.log(`📥 Created conversation inbox: ${convInboxAddress.substring(0, 20)}...`);
+  
   // X3DH key exchange
   const sessionKeyB64 = senderX3DH(
     deviceKeyset.identity_key.private_key,
@@ -242,16 +263,16 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
   
   const { ratchet_state: newState, envelope: msgEnvelope } = doubleRatchetEncrypt(ratchetState, messagePayload);
   
-  // Build init envelope with full handshake info
+  // Build init envelope with conversation-specific inbox as return address (like mobile)
   const initEnvelope = {
     user_address: registration.user_address,
     display_name: getDisplayName(),
-    return_inbox_address: deviceKeyset.inbox_address,
-    return_inbox_encryption_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_encryption_key.public_key)),
-    return_inbox_public_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.public_key)),
-    return_inbox_private_key: bytesToHex(new Uint8Array(deviceKeyset.inbox_signing_key.private_key)),
+    return_inbox_address: convInboxAddress,
+    return_inbox_encryption_key: bytesToHex(new Uint8Array(convEncryptionKey.public_key)),
+    return_inbox_public_key: bytesToHex(new Uint8Array(convSigningKey.public_key)),
+    return_inbox_private_key: bytesToHex(new Uint8Array(convSigningKey.private_key)),
     identity_public_key: bytesToHex(new Uint8Array(deviceKeyset.identity_key.public_key)),
-    tag: deviceKeyset.inbox_address,
+    tag: convInboxAddress,
     message: msgEnvelope,
     type: 'direct',
   };
@@ -287,11 +308,17 @@ async function sendFirstMessage(recipientAddress, content, device, recipient, st
       inbox_address: device.inbox_registration.inbox_address,
       inbox_encryption_key: device.inbox_registration.inbox_encryption_public_key,
     },
+    receiving_inbox: {
+      inbox_address: convInboxAddress,
+    },
+    // Store X3DH ephemeral key for reuse in subsequent init envelopes (until session confirmed)
+    x3dh_ephemeral_public_key: bytesToHex(new Uint8Array(ephemeralKey.public_key)),
+    x3dh_ephemeral_private_key: bytesToHex(new Uint8Array(ephemeralKey.private_key)),
     recipient_address: recipientAddress,
     sender_name: recipient.display_name || recipientAddress.substring(0, 12),
   });
   
-  return { sent: true, messageId, firstMessage: true };
+  return { sent: true, messageId, firstMessage: true, conversationInbox: convInboxAddress };
 }
 
 async function sendFollowUpMessage(recipientAddress, content, session, device, store, deviceKeyset, registration) {
@@ -560,13 +587,19 @@ async function cmdEdit(recipientAddress, messageId, newText, store, deviceKeyset
 }
 
 async function cmdListen(duration, store, deviceKeyset, registration) {
-  const inboxAddress = deviceKeyset.inbox_address;
-  console.log(`Listening on inbox: ${inboxAddress}`);
+  const deviceInbox = deviceKeyset.inbox_address;
+  const conversationInboxes = store.listConversationInboxes();
+  const allInboxes = [deviceInbox, ...conversationInboxes];
+  
+  console.log(`Listening on inbox: ${deviceInbox}`);
+  if (conversationInboxes.length > 0) {
+    console.log(`Plus ${conversationInboxes.length} conversation inbox(es)`);
+  }
   
   const ws = new WebSocket(WS_URL);
   
   ws.on('open', () => {
-    ws.send(JSON.stringify({ type: 'listen', inbox_addresses: [inboxAddress] }));
+    ws.send(JSON.stringify({ type: 'listen', inbox_addresses: allInboxes }));
     console.log('Connected — waiting for messages...\n');
   });
   
@@ -578,10 +611,27 @@ async function cmdListen(duration, store, deviceKeyset, registration) {
       
       const envelope = JSON.parse(msg.encryptedContent);
       const ephPubKey = hexToBytes(envelope.ephemeral_public_key);
+      const receivedOnInbox = msg.inboxAddress;
       
-      // Try to decrypt with inbox key
+      // Determine which keypair to use for decryption
+      let decryptionPrivKey;
+      if (receivedOnInbox === deviceInbox) {
+        // Received on device inbox - use device keys
+        decryptionPrivKey = [...new Uint8Array(deviceKeyset.inbox_encryption_key.private_key)];
+      } else {
+        // Check if it's a conversation inbox
+        const convKeypair = store.getConversationInboxKeypairByAddress(receivedOnInbox);
+        if (convKeypair) {
+          decryptionPrivKey = convKeypair.encryptionPrivateKey;
+        } else {
+          // Unknown inbox, try device key as fallback
+          decryptionPrivKey = [...new Uint8Array(deviceKeyset.inbox_encryption_key.private_key)];
+        }
+      }
+      
+      // Decrypt the sealed envelope
       const decrypted = decryptInboxMessage(
-        [...new Uint8Array(deviceKeyset.inbox_encryption_key.private_key)],
+        decryptionPrivKey,
         [...ephPubKey],
         JSON.parse(envelope.envelope)
       );

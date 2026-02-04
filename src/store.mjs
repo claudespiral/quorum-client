@@ -122,6 +122,62 @@ export class QuorumStore {
     return false;
   }
 
+  // ============ Conversation Inbox Keypairs ============
+
+  /**
+   * Save a conversation-specific inbox keypair.
+   * These are per-conversation inboxes used as return_inbox_address in init envelopes.
+   * 
+   * @param {Object} keypair - { conversationId, inboxAddress, encryptionPublicKey, encryptionPrivateKey, signingPublicKey, signingPrivateKey }
+   */
+  saveConversationInboxKeypair(keypair) {
+    const safeName = Buffer.from(keypair.conversationId).toString('hex');
+    atomicWriteFileSync(
+      join(this.conversationsDir, `inbox_${safeName}.json`),
+      JSON.stringify(keypair, null, 2)
+    );
+  }
+
+  /** Get conversation inbox keypair by conversationId */
+  getConversationInboxKeypair(conversationId) {
+    const safeName = Buffer.from(conversationId).toString('hex');
+    const path = join(this.conversationsDir, `inbox_${safeName}.json`);
+    if (!existsSync(path)) return null;
+    return JSON.parse(readFileSync(path, 'utf-8'));
+  }
+
+  /** Get conversation inbox keypair by inbox address */
+  getConversationInboxKeypairByAddress(inboxAddress) {
+    const files = readdirSync(this.conversationsDir).filter(f => f.startsWith('inbox_') && f.endsWith('.json'));
+    for (const file of files) {
+      const keypair = JSON.parse(readFileSync(join(this.conversationsDir, file), 'utf-8'));
+      if (keypair.inboxAddress === inboxAddress) {
+        return keypair;
+      }
+    }
+    return null;
+  }
+
+  /** List all conversation inbox addresses */
+  listConversationInboxes() {
+    const files = readdirSync(this.conversationsDir).filter(f => f.startsWith('inbox_') && f.endsWith('.json'));
+    return files.map(file => {
+      const keypair = JSON.parse(readFileSync(join(this.conversationsDir, file), 'utf-8'));
+      return keypair.inboxAddress;
+    });
+  }
+
+  /** Delete conversation inbox keypair */
+  deleteConversationInboxKeypair(conversationId) {
+    const safeName = Buffer.from(conversationId).toString('hex');
+    const path = join(this.conversationsDir, `inbox_${safeName}.json`);
+    if (existsSync(path)) {
+      unlinkSync(path);
+      return true;
+    }
+    return false;
+  }
+
   // ============ Conversations ============
 
   /** Save conversation metadata */
