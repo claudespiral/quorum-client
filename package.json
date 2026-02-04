@@ -10,7 +10,11 @@
   "scripts": {
     "test": "node test/integration.mjs",
     "test:verbose": "node test/integration.mjs --verbose",
-    "test:keep": "node test/integration.mjs --keep"
+    "test:keep": "node test/integration.mjs --keep",
+    "test:spaces": "node test/spaces.mjs",
+    "test:spaces:verbose": "node test/spaces.mjs --verbose",
+    "test:spaces:keep": "node test/spaces.mjs --keep",
+    "test:all": "node test/integration.mjs && node test/spaces.mjs"
   },
   "keywords": [
     "quilibrium",

@@ -12,6 +12,7 @@
 import { QuorumStore } from './store.mjs';
 import * as keychain from './keychain.mjs';
 import path from 'path';
+import fs from 'fs';
 
 export class SecureStore {
   constructor(dataDir, useKeychain = true) {
@@ -187,7 +188,6 @@ export class SecureStore {
   }
 
   _loadSpaceKeysFromFile(spaceId) {
-    const fs = require('fs');
     const keyPath = path.join(this._getSpacesDir(), `${spaceId}.json`);
     if (!fs.existsSync(keyPath)) return null;
     try {
@@ -198,7 +198,6 @@ export class SecureStore {
   }
 
   _saveSpaceKeysToFile(spaceId, keys) {
-    const fs = require('fs');
     const spacesDir = this._getSpacesDir();
     if (!fs.existsSync(spacesDir)) {
       fs.mkdirSync(spacesDir, { recursive: true, mode: 0o700 });
@@ -208,7 +207,6 @@ export class SecureStore {
   }
 
   _deleteSpaceKeysFile(spaceId) {
-    const fs = require('fs');
     const keyPath = path.join(this._getSpacesDir(), `${spaceId}.json`);
     if (fs.existsSync(keyPath)) {
       fs.unlinkSync(keyPath);
@@ -216,7 +214,6 @@ export class SecureStore {
   }
 
   _listSpacesFromFiles() {
-    const fs = require('fs');
     const spacesDir = this._getSpacesDir();
     if (!fs.existsSync(spacesDir)) return [];
     
